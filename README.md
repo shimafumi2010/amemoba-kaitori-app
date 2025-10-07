@@ -1,7 +1,6 @@
-
 # Amemoba Kaitori App (MVP)
 
-中古iPhone査定フローのMVP。3uToolsスクショOCR → 自動入力 → Chatwork送信 → 納品書PDFの雛形。
+中古iPhone査定フローのMVP。3uToolsスクショOCR → 自動入力 → 投稿文作成（Chatwork貼付用） → 納品書PDFの雛形。
 
 ## かんたん導入（全部ブラウザだけ）
 
@@ -18,16 +17,15 @@
 - **Environment Variables** に以下を登録（.envは不要）  
   - `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY`
   - `OPENAI_API_KEY`
-  - `CHATWORK_API_TOKEN` / `CHATWORK_ROOM_ID`
 - Deploy → 公開URLが発行されます
 
-> ローカルで動かす場合：`.env.local` を作成し、`npm install && npm run dev`
+> ローカルで動かす場合：`.env.local` を作って `npm install && npm run dev`
 
 ---
 
 ## ページ構成
 - `/` トップ/導線
-- `/assess` 査定入力（3uToolsスクショ→OCR→フォーム自動入力、価格取得、Chatwork送信）
+- `/assess` 査定入力（3uToolsスクショ→OCR→フォーム自動入力、価格取得、**Chatwork投稿文作成（コピー）**）
 - `/deliveries` 納品書リスト（雛形）
 
 ---

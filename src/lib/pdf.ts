@@ -1,4 +1,3 @@
-
 import { PDFDocument, StandardFonts } from 'pdf-lib'
 
 export async function generateDeliveryPDF(data: { customer: string; model: string; price: number }) {

@@ -1,4 +1,3 @@
-
 'use client'
 import { useState } from 'react'
 
@@ -19,8 +18,8 @@ type Device = {
 export default function AssessForm() {
   const [imgBase64, setImgBase64] = useState<string | null>(null)
   const [device, setDevice] = useState<Device>({})
-  const [sending, setSending] = useState(false)
   const [message, setMessage] = useState<string>('')
+  const [cwText, setCwText] = useState<string>('')
 
   async function runOCR() {
     if (!imgBase64) return
@@ -30,13 +29,12 @@ export default function AssessForm() {
       body: JSON.stringify({ imageBase64: imgBase64 })
     })
     const json = await res.json()
-    // Try to parse JSON content from model
     try {
       const content = json.data || json.result || ''
       const parsed = typeof content === 'string' ? JSON.parse(content) : content
       setDevice((d) => ({ ...d, ...parsed }))
     } catch {
-      // naive fallback: nothing
+      setMessage('OCRの解析結果をJSONとして解釈できませんでした。必要項目を手入力してください。')
     }
   }
 
@@ -52,24 +50,25 @@ export default function AssessForm() {
     setDevice((d) => ({ ...d, max_price: price }))
   }
 
-  async function sendChatwork() {
-    setSending(true)
-    const body = [
+  function buildChatworkText() {
+    const lines = [
       '【査定依頼】',
       `${device.model_name || ''} ${device.capacity || ''}`.trim(),
       `IMEI：${device.imei || ''}`,
       `状態：${device.condition || 'N/A'}`,
       `バッテリー：${device.battery || 'N/A'}`,
-      `特記事項：${device.notes || 'なし'}`,
-    ].join('\n')
-    const res = await fetch('/api/chatwork', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ body })
-    })
-    const ok = res.ok
-    setMessage(ok ? 'Chatworkに送信しました' : '送信失敗')
-    setSending(false)
+      `最大買取価格（参考）：${device.max_price ? `¥${device.max_price.toLocaleString()}` : 'N/A'}`,
+      `査定メモ：${device.notes || 'なし'}`
+    ]
+    const txt = lines.join('\n')
+    setCwText(txt)
+    setMessage('Chatwork投稿用のテキストを作成しました。下の「コピー」から貼り付けてください。')
+  }
+
+  async function copyText() {
+    if (!cwText) return
+    await navigator.clipboard.writeText(cwText)
+    setMessage('コピーしました。Chatworkに貼り付けてください。')
   }
 
   return (
@@ -78,10 +77,11 @@ export default function AssessForm() {
       <p>3uToolsのスクリーンショットをアップロード → OCRで自動入力</p>
       {/* Upload box */}
       {require('./UploadBox').default({ onImage: (b64: string) => setImgBase64(b64) })}
-      <div style={{ display: 'flex', gap: 8 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button onClick={runOCR} disabled={!imgBase64}>OCR実行</button>
         <button onClick={fetchPrice} disabled={!device.model_name && !device.model_number}>最大価格取得</button>
-        <button onClick={sendChatwork} disabled={sending}>Chatwork送信</button>
+        <button onClick={buildChatworkText}>Chatwork投稿文を作成</button>
+        <button onClick={copyText} disabled={!cwText}>コピー</button>
       </div>
 
       <div style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr 1fr' }}>
@@ -97,6 +97,13 @@ export default function AssessForm() {
         <label>最大買取価格<input value={device.max_price ?? ''} onChange={e => setDevice({...device, max_price: Number(e.target.value) || 0})} /></label>
         <label>査定額<input value={device.estimated_price ?? ''} onChange={e => setDevice({...device, estimated_price: Number(e.target.value) || 0})} /></label>
       </div>
+
+      {cwText && (
+        <div>
+          <h3>Chatwork投稿用テキスト</h3>
+          <pre style={{ whiteSpace: 'pre-wrap', background: '#f7f7f7', padding: 12, borderRadius: 8 }}>{cwText}</pre>
+        </div>
+      )}
 
       {message && <div>{message}</div>}
     </div>

@@ -1,6 +1,5 @@
-
 import dynamic from 'next/dynamic'
-const AssessForm = dynamic(() => import('../../components/AssessForm'), { ssr: false })
+const AssessForm = dynamic(() => import('@/components/AssessForm'), { ssr: false })
 
 export default function AssessPage() {
   return (

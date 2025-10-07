@@ -1,4 +1,3 @@
-
 export const metadata = { title: 'Amemoba Kaitori App' }
 import React from 'react'
 
