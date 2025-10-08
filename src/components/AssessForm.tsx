@@ -1,5 +1,5 @@
 'use client'
-import React, { useRef, useState } from 'react'
+import React, { useRef, useState, useEffect } from 'react'
 import { normalizeIMEI, normalizeSerial } from '../lib/ocrPostprocess'
 
 /* 定数 */
@@ -17,25 +17,12 @@ const CONDITIONS = [
 const CARRIERS = ['SoftBank', 'au(KDDI)', 'docomo', '楽天モバイル', 'SIMフリー'] as const
 const RESTRICTS = ['○', '△', '×', '-'] as const
 
-/* 型 */
-type Customer = {
-  name: string
-  furigana?: string
-  address?: string
-  phone?: string
-  birthday?: string
-}
+type SearchLink = { title: string; url: string; priceText?: string | null }
 
-/* コンポーネント */
 export default function AssessForm(): JSX.Element {
   // ヘッダ
   const [staff, setStaff] = useState('島野ひとみ')
   const [acceptedAt, setAcceptedAt] = useState(() => new Date().toISOString().slice(0, 10))
-
-  // お客様（将来：フォームの最新から一覧取得して選択にする想定。今は手入力UIのみ）
-  const [customer, setCustomer] = useState<Customer>({
-    name: '', furigana: '', address: '', phone: '', birthday: ''
-  })
 
   // 端末
   const [device, setDevice] = useState({
@@ -51,19 +38,30 @@ export default function AssessForm(): JSX.Element {
   const [condition, setCondition] = useState('B')
   const [conditionNote, setConditionNote] = useState('')
 
+  // 価格系
+  const [maxPrice, setMaxPrice] = useState<number | ''>('')
+  const [discount, setDiscount] = useState<number | ''>('') // 減額
+  const [todayPrice, setTodayPrice] = useState<number>(0)
+  const [searchLinks, setSearchLinks] = useState<SearchLink[]>([])
+
   // OCR
   const [imgBase64, setImgBase64] = useState<string | null>(null)
   const [message, setMessage] = useState('')
   const pasteRef = useRef<HTMLDivElement>(null)
 
-  /* 共通スタイル */
+  /* 見た目 */
   const section: React.CSSProperties = { border: '1px solid #e5e7eb', borderRadius: 10, padding: 12, background: '#fff' }
   const label: React.CSSProperties = { fontWeight: 600, fontSize: 13 }
   const box: React.CSSProperties = { width: '100%', padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 8 }
-
-  // 2列と4列の行レイアウト（重なり防止。明示的に列幅を決めます）
   const row2 = { display: 'grid', gridTemplateColumns: '160px 1fr', gap: 10, alignItems: 'center' } as const
   const row4 = { display: 'grid', gridTemplateColumns: '160px 1fr 160px 1fr', gap: 10, alignItems: 'center' } as const
+
+  /* 本日査定金額 = MAX - 減額 */
+  useEffect(() => {
+    const max = typeof maxPrice === 'number' ? maxPrice : Number(maxPrice || 0)
+    const disc = typeof discount === 'number' ? discount : Number(discount || 0)
+    setTodayPrice(Math.max(0, max - disc))
+  }, [maxPrice, discount])
 
   /* 画像→Base64 */
   function fileToBase64(file: File) {
@@ -75,7 +73,7 @@ export default function AssessForm(): JSX.Element {
     })
   }
 
-  /* 貼り付けで画像取得 */
+  /* 貼り付け */
   async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
     const items = e.clipboardData?.items
     if (!items) return
@@ -92,7 +90,7 @@ export default function AssessForm(): JSX.Element {
     }
   }
 
-  // ===== OCR実行（強化版） =====
+  /* OCR実行（強化版） */
   async function runOCR() {
     if (!imgBase64) return
     setMessage('OCR中…')
@@ -104,7 +102,6 @@ export default function AssessForm(): JSX.Element {
         body: JSON.stringify({ imageBase64: imgBase64 })
       })
 
-      // HTTP レベルの失敗（429等）を検出
       if (!res.ok) {
         let body = ''
         try { body = await res.text() } catch {}
@@ -113,22 +110,17 @@ export default function AssessForm(): JSX.Element {
       }
 
       const json = await res.json()
-
-      // API レベルの失敗
       if (json?.ok === false) {
         setMessage(`OCR失敗: ${json?.error || 'unknown error'}`)
         return
       }
 
-      // 代表ペイロードを取り出し
       const payload: any = json?.data ?? json?.result ?? json?.content ?? {}
-
       if (!payload || typeof payload !== 'object' || Object.keys(payload).length === 0) {
         setMessage('OCR失敗: 結果が空でした（項目を読み取れませんでした）')
         return
       }
 
-      // 正規化（stringを返します）
       const imeiNorm = normalizeIMEI(payload.imei)
       const serialNorm = normalizeSerial(payload.serial)
 
@@ -143,14 +135,41 @@ export default function AssessForm(): JSX.Element {
         battery: payload.battery ?? d.battery,
       }))
 
-      // 警告があれば併記
       const warns = Array.isArray(json?.warnings) && json.warnings.length
         ? ` 注意: ${json.warnings.join(' / ')}`
         : ''
-
       setMessage('OCR完了：必要項目を反映しました。' + warns)
     } catch (e: any) {
       setMessage(`OCR失敗: ${e?.message ?? 'unknown'}`)
+    }
+  }
+
+  /* amemoba 検索：モデル番号の半角スペース前で検索 → リンク一覧 */
+  async function searchAmemoba() {
+    const raw = (device.model_number || device.model_name || '').trim()
+    if (!raw) {
+      alert('モデル番号 または 機種名を入力してください')
+      return
+    }
+    const key = raw.split(/\s+/)[0] // 半角スペースより前
+    setMessage(`amemoba検索中…（${key}）`)
+    setSearchLinks([])
+    try {
+      const res = await fetch('/api/price', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: key })
+      })
+      const json = await res.json()
+      if (!res.ok || json?.ok === false) {
+        setMessage(`検索失敗: ${json?.error || `${res.status} ${res.statusText}`}`)
+        return
+      }
+      const links: SearchLink[] = Array.isArray(json.results) ? json.results : []
+      setSearchLinks(links)
+      setMessage(`検索完了：${links.length}件ヒット（キーワード: ${json.normalizedQuery || key}）`)
+    } catch (e: any) {
+      setMessage(`検索失敗: ${e?.message ?? 'unknown'}`)
     }
   }
 
@@ -170,28 +189,6 @@ export default function AssessForm(): JSX.Element {
           </select>
           <div style={label}>受付日</div>
           <input type="date" value={acceptedAt} onChange={(e) => setAcceptedAt(e.target.value)} style={box} />
-        </div>
-      </div>
-
-      {/* お客様情報（重なり解消） */}
-      <div style={section}>
-        <div style={row4}>
-          <div style={label}>お名前</div>
-          <input value={customer.name} onChange={e => setCustomer({ ...customer, name: e.target.value })} style={box} />
-          <div style={label}>フリガナ</div>
-          <input value={customer.furigana || ''} onChange={e => setCustomer({ ...customer, furigana: e.target.value })} style={box} />
-        </div>
-        <div style={{ height: 8 }} />
-        <div style={row2}>
-          <div style={label}>ご住所</div>
-          <input value={customer.address || ''} onChange={e => setCustomer({ ...customer, address: e.target.value })} style={box} />
-        </div>
-        <div style={{ height: 8 }} />
-        <div style={row4}>
-          <div style={label}>電話番号</div>
-          <input value={customer.phone || ''} onChange={e => setCustomer({ ...customer, phone: e.target.value })} style={box} />
-          <div style={label}>生年月日</div>
-          <input type="date" value={customer.birthday || ''} onChange={e => setCustomer({ ...customer, birthday: e.target.value })} style={box} />
         </div>
       </div>
 
@@ -259,47 +256,4 @@ export default function AssessForm(): JSX.Element {
         </div>
       </div>
 
-      {/* ロック＆状態（1行 + メモ広め） */}
-      <div style={section}>
-        <div style={row4}>
-          <div style={label}>箱・付属品</div>
-          <select value={acc} onChange={e => setAcc(e.target.value)} style={box}>
-            <option value="">選択</option>
-            {ACCESSORIES.map(v => <option key={v} value={v}>{v}</option>)}
-          </select>
-          <div style={label}>SIMロック</div>
-          <select value={simLock} onChange={e => setSimLock(e.target.value)} style={box}>
-            <option value="">選択</option>
-            {LOCK_YN.map(v => <option key={v} value={v}>{v}</option>)}
-          </select>
-        </div>
-        <div style={{ height: 8 }} />
-        <div style={row4}>
-          <div style={label}>アクティベーションロック</div>
-          <select value={actLock} onChange={e => setActLock(e.target.value)} style={box}>
-            <option value="">選択</option>
-            {LOCK_YN.map(v => <option key={v} value={v}>{v}</option>)}
-          </select>
-          <div style={label}>状態</div>
-          <select
-            value={condition}
-            onChange={e => setCondition(e.target.value)}
-            style={{ ...box, width: '100%' }}
-          >
-            {CONDITIONS.map(c => <option key={c.code} value={c.code}>{c.label}</option>)}
-          </select>
-        </div>
-        <div style={{ height: 8 }} />
-        <div style={row2}>
-          <div style={label}>状態メモ</div>
-          <textarea
-            placeholder="例）液晶傷あり／カメラ不良／FaceIDエラー など"
-            value={conditionNote}
-            onChange={e => setConditionNote(e.target.value)}
-            style={{ ...box, height: 90, resize: 'vertical' }}
-          />
-        </div>
-      </div>
-    </div>
-  )
-}
+      {/* 価格ボックス（MAX*
