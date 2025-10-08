@@ -1,5 +1,5 @@
 'use client'
-import { useCallback, useRef, useState } from 'react'
+import React, { useCallback, useRef, useState } from 'react'
 
 type Device = {
   model_name?: string
@@ -15,7 +15,7 @@ type Device = {
   notes?: string
 }
 
-export default function AssessForm() {
+export default function AssessForm(): JSX.Element {
   const [imgBase64, setImgBase64] = useState<string | null>(null)
   const [device, setDevice] = useState<Device>({})
   const [customerName, setCustomerName] = useState<string>('')
@@ -25,9 +25,6 @@ export default function AssessForm() {
 
   const pasteZoneRef = useRef<HTMLDivElement>(null)
 
-  // ===============================
-  // 共通：Blob/File → base64へ
-  // ===============================
   const blobToBase64 = useCallback((blob: Blob): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader()
@@ -37,18 +34,15 @@ export default function AssessForm() {
     })
   }, [])
 
-  // ===============================
-  // 1) 貼り付け（Ctrl+V / Snipping Tool）
-  // ===============================
   const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLDivElement>) => {
     try {
       const items = e.clipboardData?.items
       if (!items || items.length === 0) return
       for (const item of items) {
         if (item.type.startsWith('image/')) {
-          const blob = item.getAsFile()
-          if (!blob) continue
-          const base64 = await blobToBase64(blob)
+          const file = item.getAsFile()
+          if (!file) continue
+          const base64 = await blobToBase64(file)
           setImgBase64(base64)
           setMessage('画像を貼り付けました。OCR実行できます。')
           e.preventDefault()
@@ -61,13 +55,8 @@ export default function AssessForm() {
     }
   }, [blobToBase64])
 
-  // 2) クリップボード読み取りボタン（Permissions必要/Https/ユーザ操作必須）
   const handleClipboardButton = useCallback(async () => {
     try {
-      // 一部のブラウザで有効（Chrome系）。許可ダイアログが出ます。
-      // 画像が複数ある場合は先頭を使用
-      // 注意: Safariは未対応、Firefoxはフラグ次第
-      // フォールバックとしてCtrl+V貼り付け/ドラッグ&ドロップを用意しています
       // @ts-ignore
       if (!navigator.clipboard?.read) {
         setMessage('このブラウザはボタンからの画像読み取りに非対応です。Ctrl+Vで貼り付けを使ってください。')
@@ -92,7 +81,6 @@ export default function AssessForm() {
     }
   }, [blobToBase64])
 
-  // 3) ドラッグ＆ドロップでも受け付け
   const handleDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
     try {
@@ -113,19 +101,17 @@ export default function AssessForm() {
     e.preventDefault()
   }, [])
 
-  // 4) 従来のファイル選択（予備）
   function handleFileInput(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
     const reader = new FileReader()
-    reader.onload = () => setImgBase64(reader.result as string)
+    reader.onload = () => {
+      setImgBase64(reader.result as string)
+      setMessage('画像を選択しました。OCR実行できます。')
+    }
     reader.readAsDataURL(file)
-    setMessage('画像を選択しました。OCR実行できます。')
   }
 
-  // ===============================
-  // OCR実行（3uToolsスクショ→構造化JSON）
-  // ===============================
   async function runOCR() {
     if (!imgBase64) return
     setMessage('OCR中…')
@@ -135,20 +121,15 @@ export default function AssessForm() {
       body: JSON.stringify({ imageBase64: imgBase64 })
     })
     const json = await res.json()
-
     if (!json.ok) {
       setMessage(`OCR失敗: ${json.error || 'unknown'}`)
       return
     }
-
     const parsed = json.data || {}
     setDevice(d => ({ ...d, ...parsed }))
     setMessage('OCR完了：抽出した項目をフォームへ反映しました。')
   }
 
-  // ===============================
-  // 価格取得
-  // ===============================
   async function fetchPrice() {
     const key = device.model_name || device.model_number
     if (!key) return
@@ -161,9 +142,6 @@ export default function AssessForm() {
     setDevice(d => ({ ...d, max_price: price }))
   }
 
-  // ===============================
-  // Chatwork投稿文生成
-  // ===============================
   function buildChatworkText() {
     const lines = [
       '【査定依頼】',
@@ -185,9 +163,6 @@ export default function AssessForm() {
     setMessage('コピーしました。Chatworkに貼り付けてください。')
   }
 
-  // ===============================
-  // Supabase保存
-  // ===============================
   async function saveToSupabase() {
     setMessage('保存中…')
     const payload = {
@@ -209,13 +184,11 @@ export default function AssessForm() {
       },
       chatwork_text: cwText || null
     }
-
     const res = await fetch('/api/assessments', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     })
-
     const json = await res.json()
     if (json.ok) {
       setMessage(`保存しました（assessment_id: ${json.assessment_id}）`)
@@ -227,9 +200,8 @@ export default function AssessForm() {
   return (
     <div style={{ display: 'grid', gap: 12 }}>
       <h2>査定フォーム</h2>
-      <p>Snipping Toolでコピー後、下のエリアをクリックして <b>Ctrl + V</b> で貼り付けできます。画像ファイル不要！</p>
+      <p>Snipping Toolでコピー後、下のエリアをクリックして <b>Ctrl + V</b> で貼り付けできます。</p>
 
-      {/* ペースト/ドロップ対応のエリア */}
       <div
         ref={pasteZoneRef}
         onPaste={handlePaste}
@@ -251,9 +223,7 @@ export default function AssessForm() {
       >
         <div>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>ここをクリックして Ctrl + V で貼り付け</div>
-          <div style={{ fontSize: 12, color: '#555' }}>
-            画像をドラッグ＆ドロップすることもできます
-          </div>
+          <div style={{ fontSize: 12, color: '#555' }}>画像をドラッグ＆ドロップも可</div>
           <div style={{ marginTop: 10 }}>
             <button type="button" onClick={handleClipboardButton}>クリップボードから取得（対応ブラウザ）</button>
           </div>
@@ -263,14 +233,12 @@ export default function AssessForm() {
         </div>
       </div>
 
-      {/* プレビュー */}
       {imgBase64 && (
         <div style={{ marginTop: 8 }}>
           <img src={imgBase64} alt="preview" style={{ maxWidth: '100%', border: '1px solid #ccc', borderRadius: 8 }} />
         </div>
       )}
 
-      {/* 操作ボタン */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button onClick={runOCR} disabled={!imgBase64}>OCR実行</button>
         <button onClick={fetchPrice} disabled={!device.model_name && !device.model_number}>最大価格取得</button>
@@ -279,13 +247,11 @@ export default function AssessForm() {
         <button onClick={saveToSupabase}>保存</button>
       </div>
 
-      {/* お客様情報 */}
       <div style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr 1fr' }}>
         <label>お名前<input value={customerName} onChange={e => setCustomerName(e.target.value)} /></label>
         <label>電話番号<input value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} /></label>
       </div>
 
-      {/* 端末情報 */}
       <div style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr 1fr' }}>
         <label>機種名<input value={device.model_name || ''} onChange={e => setDevice({ ...device, model_name: e.target.value })} /></label>
         <label>容量<input value={device.capacity || ''} onChange={e => setDevice({ ...device, capacity: e.target.value })} /></label>
@@ -296,4 +262,18 @@ export default function AssessForm() {
         <label>バッテリー<input value={device.battery || ''} onChange={e => setDevice({ ...device, battery: e.target.value })} /></label>
         <label>状態<input value={device.condition || ''} onChange={e => setDevice({ ...device, condition: e.target.value })} /></label>
         <label style={{ gridColumn: '1 / -1' }}>特記事項<textarea value={device.notes || ''} onChange={e => setDevice({ ...device, notes: e.target.value })} /></label>
-        <label>最大買取価格<input value={device.max_price ?? ''} onChange={_
+        <label>最大買取価格<input value={device.max_price ?? ''} onChange={e => setDevice({ ...device, max_price: Number(e.target.value) || 0 })} /></label>
+        <label>査定額<input value={device.estimated_price ?? ''} onChange={e => setDevice({ ...device, estimated_price: Number(e.target.value) || 0 })} /></label>
+      </div>
+
+      {cwText && (
+        <div>
+          <h3>Chatwork投稿用テキスト</h3>
+          <pre style={{ whiteSpace: 'pre-wrap', background: '#f7f7f7', padding: 12, borderRadius: 8 }}>{cwText}</pre>
+        </div>
+      )}
+
+      {message && <div style={{ background: '#eef', padding: 8, borderRadius: 4 }}>{message}</div>}
+    </div>
+  )
+}
