@@ -1,5 +1,5 @@
 'use client'
-import { useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 
 type Device = {
   model_name?: string
@@ -16,35 +16,139 @@ type Device = {
 }
 
 export default function AssessForm() {
-  // 画像→OCR
   const [imgBase64, setImgBase64] = useState<string | null>(null)
-  // 端末情報
   const [device, setDevice] = useState<Device>({})
-  // お客様情報（最小）
   const [customerName, setCustomerName] = useState<string>('')
   const [customerPhone, setCustomerPhone] = useState<string>('')
-
-  // UIメッセージ & Chatwork用テキスト
   const [message, setMessage] = useState<string>('')
   const [cwText, setCwText] = useState<string>('')
 
+  const pasteZoneRef = useRef<HTMLDivElement>(null)
+
+  // ===============================
+  // 共通：Blob/File → base64へ
+  // ===============================
+  const blobToBase64 = useCallback((blob: Blob): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as string)
+      reader.onerror = reject
+      reader.readAsDataURL(blob)
+    })
+  }, [])
+
+  // ===============================
+  // 1) 貼り付け（Ctrl+V / Snipping Tool）
+  // ===============================
+  const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLDivElement>) => {
+    try {
+      const items = e.clipboardData?.items
+      if (!items || items.length === 0) return
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          const blob = item.getAsFile()
+          if (!blob) continue
+          const base64 = await blobToBase64(blob)
+          setImgBase64(base64)
+          setMessage('画像を貼り付けました。OCR実行できます。')
+          e.preventDefault()
+          return
+        }
+      }
+      setMessage('貼り付けに画像が含まれていません。Snipping Toolでコピー後にCtrl+Vしてください。')
+    } catch (err: any) {
+      setMessage(`貼り付けエラー: ${err?.message || 'unknown'}`)
+    }
+  }, [blobToBase64])
+
+  // 2) クリップボード読み取りボタン（Permissions必要/Https/ユーザ操作必須）
+  const handleClipboardButton = useCallback(async () => {
+    try {
+      // 一部のブラウザで有効（Chrome系）。許可ダイアログが出ます。
+      // 画像が複数ある場合は先頭を使用
+      // 注意: Safariは未対応、Firefoxはフラグ次第
+      // フォールバックとしてCtrl+V貼り付け/ドラッグ&ドロップを用意しています
+      // @ts-ignore
+      if (!navigator.clipboard?.read) {
+        setMessage('このブラウザはボタンからの画像読み取りに非対応です。Ctrl+Vで貼り付けを使ってください。')
+        return
+      }
+      // @ts-ignore
+      const items: ClipboardItem[] = await navigator.clipboard.read()
+      for (const item of items) {
+        for (const type of item.types) {
+          if (type.startsWith('image/')) {
+            const blob = await item.getType(type)
+            const base64 = await blobToBase64(blob)
+            setImgBase64(base64)
+            setMessage('クリップボードから画像を取得しました。OCR実行できます。')
+            return
+          }
+        }
+      }
+      setMessage('クリップボードに画像が見つかりません。Snipping Toolでコピー後に再実行、またはCtrl+Vで貼り付けしてください。')
+    } catch (err: any) {
+      setMessage(`クリップボード取得エラー: ${err?.message || 'unknown'}`)
+    }
+  }, [blobToBase64])
+
+  // 3) ドラッグ＆ドロップでも受け付け
+  const handleDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    try {
+      const file = e.dataTransfer.files?.[0]
+      if (!file || !file.type.startsWith('image/')) {
+        setMessage('画像ファイルをドロップしてください。')
+        return
+      }
+      const base64 = await blobToBase64(file)
+      setImgBase64(base64)
+      setMessage('画像をドロップしました。OCR実行できます。')
+    } catch (err: any) {
+      setMessage(`ドロップエラー: ${err?.message || 'unknown'}`)
+    }
+  }, [blobToBase64])
+
+  const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+  }, [])
+
+  // 4) 従来のファイル選択（予備）
+  function handleFileInput(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => setImgBase64(reader.result as string)
+    reader.readAsDataURL(file)
+    setMessage('画像を選択しました。OCR実行できます。')
+  }
+
+  // ===============================
+  // OCR実行（3uToolsスクショ→構造化JSON）
+  // ===============================
   async function runOCR() {
     if (!imgBase64) return
+    setMessage('OCR中…')
     const res = await fetch('/api/ocr', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ imageBase64: imgBase64 })
     })
     const json = await res.json()
-    try {
-      const content = json.data || json.result || ''
-      const parsed = typeof content === 'string' ? JSON.parse(content) : content
-      setDevice((d) => ({ ...d, ...parsed }))
-    } catch {
-      setMessage('OCRの解析結果をJSONとして解釈できませんでした。必要項目を手入力してください。')
+
+    if (!json.ok) {
+      setMessage(`OCR失敗: ${json.error || 'unknown'}`)
+      return
     }
+
+    const parsed = json.data || {}
+    setDevice(d => ({ ...d, ...parsed }))
+    setMessage('OCR完了：抽出した項目をフォームへ反映しました。')
   }
 
+  // ===============================
+  // 価格取得
+  // ===============================
   async function fetchPrice() {
     const key = device.model_name || device.model_number
     if (!key) return
@@ -54,9 +158,12 @@ export default function AssessForm() {
       body: JSON.stringify({ query: key })
     })
     const { price } = await res.json()
-    setDevice((d) => ({ ...d, max_price: price }))
+    setDevice(d => ({ ...d, max_price: price }))
   }
 
+  // ===============================
+  // Chatwork投稿文生成
+  // ===============================
   function buildChatworkText() {
     const lines = [
       '【査定依頼】',
@@ -78,7 +185,9 @@ export default function AssessForm() {
     setMessage('コピーしました。Chatworkに貼り付けてください。')
   }
 
-  // 🔽 Supabase 保存
+  // ===============================
+  // Supabase保存
+  // ===============================
   async function saveToSupabase() {
     setMessage('保存中…')
     const payload = {
@@ -118,10 +227,48 @@ export default function AssessForm() {
   return (
     <div style={{ display: 'grid', gap: 12 }}>
       <h2>査定フォーム</h2>
-      <p>3uToolsのスクリーンショットをアップロード → OCRで自動入力</p>
+      <p>Snipping Toolでコピー後、下のエリアをクリックして <b>Ctrl + V</b> で貼り付けできます。画像ファイル不要！</p>
 
-      {/* アップロード */}
-      {require('./UploadBox').default({ onImage: (b64: string) => setImgBase64(b64) })}
+      {/* ペースト/ドロップ対応のエリア */}
+      <div
+        ref={pasteZoneRef}
+        onPaste={handlePaste}
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        tabIndex={0}
+        style={{
+          border: '2px dashed #999',
+          borderRadius: 10,
+          padding: 16,
+          minHeight: 160,
+          outline: 'none',
+          background: '#fafafa',
+          display: 'grid',
+          placeItems: 'center',
+          textAlign: 'center'
+        }}
+        aria-label="ここをクリックしてCtrl+Vで貼り付け / 画像をドロップ"
+      >
+        <div>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>ここをクリックして Ctrl + V で貼り付け</div>
+          <div style={{ fontSize: 12, color: '#555' }}>
+            画像をドラッグ＆ドロップすることもできます
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <button type="button" onClick={handleClipboardButton}>クリップボードから取得（対応ブラウザ）</button>
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <input type="file" accept="image/*" onChange={handleFileInput} />
+          </div>
+        </div>
+      </div>
+
+      {/* プレビュー */}
+      {imgBase64 && (
+        <div style={{ marginTop: 8 }}>
+          <img src={imgBase64} alt="preview" style={{ maxWidth: '100%', border: '1px solid #ccc', borderRadius: 8 }} />
+        </div>
+      )}
 
       {/* 操作ボタン */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -149,19 +296,4 @@ export default function AssessForm() {
         <label>バッテリー<input value={device.battery || ''} onChange={e => setDevice({ ...device, battery: e.target.value })} /></label>
         <label>状態<input value={device.condition || ''} onChange={e => setDevice({ ...device, condition: e.target.value })} /></label>
         <label style={{ gridColumn: '1 / -1' }}>特記事項<textarea value={device.notes || ''} onChange={e => setDevice({ ...device, notes: e.target.value })} /></label>
-        <label>最大買取価格<input value={device.max_price ?? ''} onChange={e => setDevice({ ...device, max_price: Number(e.target.value) || 0 })} /></label>
-        <label>査定額<input value={device.estimated_price ?? ''} onChange={e => setDevice({ ...device, estimated_price: Number(e.target.value) || 0 })} /></label>
-      </div>
-
-      {/* Chatwork投稿用テキスト */}
-      {cwText && (
-        <div>
-          <h3>Chatwork投稿用テキスト</h3>
-          <pre style={{ whiteSpace: 'pre-wrap', background: '#f7f7f7', padding: 12, borderRadius: 8 }}>{cwText}</pre>
-        </div>
-      )}
-
-      {message && <div>{message}</div>}
-    </div>
-  )
-}
+        <label>最大買取価格<input value={device.max_price ?? ''} onChange={_
