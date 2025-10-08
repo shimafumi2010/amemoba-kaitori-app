@@ -92,37 +92,63 @@ export default function AssessForm(): JSX.Element {
     }
   }
 
-  /* OCR 実行 */
+  // ===== OCR実行（強化版） =====
   async function runOCR() {
     if (!imgBase64) return
     setMessage('OCR中…')
+
     try {
       const res = await fetch('/api/ocr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ imageBase64: imgBase64 })
       })
-      const json = await res.json()
-      const content = json?.result ?? json?.data ?? json?.content ?? json
-      const parsed: any =
-        typeof content === 'string'
-          ? (() => { try { return JSON.parse(content) } catch { return {} } })()
-          : content || {}
 
-      const imeiNorm = normalizeIMEI(parsed.imei)
-      const serialNorm = normalizeSerial(parsed.serial)
+      // HTTP レベルの失敗（429等）を検出
+      if (!res.ok) {
+        let body = ''
+        try { body = await res.text() } catch {}
+        setMessage(`OCR失敗: HTTP ${res.status} ${res.statusText}${body ? ` / ${body.slice(0,180)}…` : ''}`)
+        return
+      }
+
+      const json = await res.json()
+
+      // API レベルの失敗
+      if (json?.ok === false) {
+        setMessage(`OCR失敗: ${json?.error || 'unknown error'}`)
+        return
+      }
+
+      // 代表ペイロードを取り出し
+      const payload: any = json?.data ?? json?.result ?? json?.content ?? {}
+
+      if (!payload || typeof payload !== 'object' || Object.keys(payload).length === 0) {
+        setMessage('OCR失敗: 結果が空でした（項目を読み取れませんでした）')
+        return
+      }
+
+      // 正規化（stringを返します）
+      const imeiNorm = normalizeIMEI(payload.imei)
+      const serialNorm = normalizeSerial(payload.serial)
 
       setDevice(d => ({
         ...d,
-        model_name: parsed.model_name ?? d.model_name,
-        capacity: parsed.capacity ?? d.capacity,
-        color: parsed.color ?? d.color,
-        model_number: parsed.model_number ?? d.model_number,
-        imei: imeiNorm || parsed.imei || d.imei,
-        serial: serialNorm || parsed.serial || d.serial,
-        battery: parsed.battery ?? d.battery,
+        model_name: payload.model_name ?? d.model_name,
+        capacity: payload.capacity ?? d.capacity,
+        color: payload.color ?? d.color,
+        model_number: payload.model_number ?? d.model_number,
+        imei: imeiNorm || payload.imei || d.imei,
+        serial: serialNorm || payload.serial || d.serial,
+        battery: payload.battery ?? d.battery,
       }))
-      setMessage('OCR完了：必要項目を反映しました。')
+
+      // 警告があれば併記
+      const warns = Array.isArray(json?.warnings) && json.warnings.length
+        ? ` 注意: ${json.warnings.join(' / ')}`
+        : ''
+
+      setMessage('OCR完了：必要項目を反映しました。' + warns)
     } catch (e: any) {
       setMessage(`OCR失敗: ${e?.message ?? 'unknown'}`)
     }
