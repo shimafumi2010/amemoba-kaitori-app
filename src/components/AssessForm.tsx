@@ -256,4 +256,102 @@ export default function AssessForm(): JSX.Element {
         </div>
       </div>
 
-      {/* 価格ボックス（MAX*
+      {/* 価格ボックス（MAX／減額／本日査定金額 & amemoba検索リンク） */}
+      <div style={section}>
+        <div style={row4}>
+          <div style={label}>MAX買取価格</div>
+          <input
+            value={maxPrice === '' ? '' : maxPrice}
+            onChange={e => setMaxPrice(e.target.value ? Number(e.target.value) : '')}
+            inputMode="numeric"
+            placeholder="例) 51000"
+            style={box}
+          />
+          <div style={label}>減額（合計）</div>
+          <input
+            value={discount === '' ? '' : discount}
+            onChange={e => setDiscount(e.target.value ? Number(e.target.value) : '')}
+            inputMode="numeric"
+            placeholder="例) 3000"
+            style={box}
+          />
+        </div>
+        <div style={{ height: 8 }} />
+        <div style={row2}>
+          <div style={label}>本日査定金額</div>
+          <input
+            value={todayPrice.toLocaleString()}
+            readOnly
+            style={{ ...box, background: '#f9fafb', fontWeight: 700 }}
+          />
+        </div>
+
+        <div style={{ height: 12 }} />
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button onClick={searchAmemoba} style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid #ddd' }}>
+            amemobaで商品検索（モデル番号の前半で）
+          </button>
+          <div style={{ color: '#6b7280', fontSize: 12 }}>
+            例：<b>MLJH3 J/A</b> → <b>MLJH3</b> で検索。ヒットリンクを下に表示します。
+          </div>
+        </div>
+
+        {searchLinks.length > 0 && (
+          <div style={{ marginTop: 8, display: 'grid', gap: 6 }}>
+            {searchLinks.map((l, i) => (
+              <a key={i} href={l.url} target="_blank" rel="noreferrer"
+                 style={{ padding: '8px 10px', border: '1px solid #e5e7eb', borderRadius: 8, textDecoration: 'none' }}>
+                <div style={{ fontWeight: 600 }}>{l.title}</div>
+                {l.priceText && <div style={{ color: '#2563eb' }}>価格表示: {l.priceText}</div>}
+                <div style={{ color: '#6b7280', fontSize: 12 }}>{l.url}</div>
+              </a>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ロック＆状態 */}
+      <div style={section}>
+        <div style={row4}>
+          <div style={label}>箱・付属品</div>
+          <select value={acc} onChange={e => setAcc(e.target.value)} style={box}>
+            <option value="">選択</option>
+            {ACCESSORIES.map(v => <option key={v} value={v}>{v}</option>)}
+          </select>
+          <div style={label}>SIMロック</div>
+          <select value={simLock} onChange={e => setSimLock(e.target.value)} style={box}>
+            <option value="">選択</option>
+            {LOCK_YN.map(v => <option key={v} value={v}>{v}</option>)}
+          </select>
+        </div>
+        <div style={{ height: 8 }} />
+        <div style={row4}>
+          <div style={label}>アクティベーションロック</div>
+          <select value={actLock} onChange={e => setActLock(e.target.value)} style={box}>
+            <option value="">選択</option>
+            {LOCK_YN.map(v => <option key={v} value={v}>{v}</option>)}
+          </select>
+          <div style={label}>状態</div>
+          <select
+            value={condition}
+            onChange={e => setCondition(e.target.value)}
+            style={box}
+          >
+            {CONDITIONS.map(c => <option key={c.code} value={c.code}>{c.label}</option>)}
+          </select>
+        </div>
+        <div style={{ height: 8 }} />
+        <div style={row2}>
+          <div style={label}>状態メモ</div>
+          <textarea
+            placeholder="例）液晶傷あり／カメラ不良／FaceIDエラー など"
+            value={conditionNote}
+            onChange={e => setConditionNote(e.target.value)}
+            style={{ ...box, height: 90, resize: 'vertical' }}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
