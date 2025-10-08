@@ -20,18 +20,20 @@ export async function POST(req: Request) {
     const client = new OpenAI({ apiKey })
 
     const systemPrompt =
-      '3uToolsのスクリーンショットから機種情報を抽出して、指定のJSONだけ返してください。追加の説明は不要。'
+      '3uToolsのスクリーンショットから端末情報を抽出して、指定のJSONだけ返してください。追加説明は不要。'
 
     const schemaHint = `
-期待するJSON:
+返すJSONの厳密スキーマ（キー以外の文字は入れないこと）:
 {
-  "model_name": "iPhone 13 Pro など",
-  "capacity": "128GB / 256GB / 512GB / 1TB",
-  "color": "Sierra Blue など",
-  "model_number": "MLTE3J/A など (SalesModel)",
-  "imei": "15桁の数字",
-  "serial": "英数字シリアル",
-  "battery": "85% のように百分率"
+  "model_name": "例: iPhone 11 Pro",
+  "capacity": "例: 64GB",
+  "color": "例: Midnight Green",
+  "model_number": "例: MWC62J/A",
+  "imei": "15桁の数字を一つ（見つからない時は空文字）",
+  "serial": "英数字のシリアルを一つ（見つからない時は空文字）",
+  "battery": "例: 100%",
+  "imei_candidates": ["画像内で見える15桁の数字列をすべて（重複除去）"],
+  "serial_candidates": ["画像内で見える8〜14文字の英数字列をなるべく（最大5件、重複除去）"]
 }
 `.trim()
 
@@ -40,7 +42,7 @@ export async function POST(req: Request) {
       {
         role: 'user',
         content: [
-          { type: 'text', text: `以下の画像から指定のJSONのみ返してください。\n${schemaHint}` },
+          { type: 'text', text: `以下の画像からJSONだけ返してください。\n${schemaHint}` },
           { type: 'image_url', image_url: { url: imageBase64 } }
         ]
       }
@@ -55,13 +57,15 @@ export async function POST(req: Request) {
     let content = resp.choices?.[0]?.message?.content ?? ''
     if (!content) return NextResponse.json({ ok: false, error: 'Empty OCR response' }, { status: 500 })
 
+    // 余計な文字が混ざっても {} 部分だけ抜く
     const jsonMatch = content.match(/\{[\s\S]*\}/)
     if (jsonMatch) content = jsonMatch[0]
 
-    let parsed: OcrResult = {}
-    try { parsed = JSON.parse(content) as OcrResult } catch { parsed = {} }
+    let parsed: any = {}
+    try { parsed = JSON.parse(content) } catch { parsed = {} }
 
-    const { data, warnings } = postprocessOcr(parsed)
+    // 型を緩く受けて postprocess で整える
+    const { data, warnings } = postprocessOcr(parsed as OcrResult)
 
     return NextResponse.json({ ok: true, data, warnings })
   } catch (e: any) {
