@@ -6,6 +6,7 @@ const nextConfig = {
     serverActions: { allowedOrigins: ['*'] }
   },
   webpack: (config) => {
+    // ✅ どの環境でも @ が /src を指すように固定
     config.resolve.alias['@'] = path.resolve(__dirname, 'src')
     return config
   }
