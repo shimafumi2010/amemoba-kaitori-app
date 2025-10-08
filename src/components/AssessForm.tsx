@@ -1,5 +1,6 @@
 'use client'
 import React, { useCallback, useRef, useState } from 'react'
+import { normalizeIMEI, normalizeSerial } from '../lib/ocrPostprocess'
 
 type Device = {
   model_name?: string
@@ -22,6 +23,7 @@ export default function AssessForm(): JSX.Element {
   const [customerPhone, setCustomerPhone] = useState<string>('')
   const [message, setMessage] = useState<string>('')
   const [cwText, setCwText] = useState<string>('')
+  const [warnings, setWarnings] = useState<string[]>([])
 
   const pasteZoneRef = useRef<HTMLDivElement>(null)
 
@@ -125,9 +127,20 @@ export default function AssessForm(): JSX.Element {
       setMessage(`OCR失敗: ${json.error || 'unknown'}`)
       return
     }
+
     const parsed = json.data || {}
-    setDevice(d => ({ ...d, ...parsed }))
-    setMessage('OCR完了：抽出した項目をフォームへ反映しました。')
+    // 念のためフロント側でも安全補正（二重）
+    const imeiNorm = normalizeIMEI(parsed.imei)
+    const serialNorm = normalizeSerial(parsed.serial)
+
+    setWarnings(Array.isArray(json.warnings) ? json.warnings : [])
+    setDevice(d => ({
+      ...d,
+      ...parsed,
+      imei: imeiNorm.value || parsed.imei,
+      serial: serialNorm.value || parsed.serial
+    }))
+    setMessage('OCR完了：抽出＋正規化を反映しました。')
   }
 
   async function fetchPrice() {
@@ -200,7 +213,7 @@ export default function AssessForm(): JSX.Element {
   return (
     <div style={{ display: 'grid', gap: 12 }}>
       <h2>査定フォーム</h2>
-      <p>Snipping Toolでコピー後、下のエリアをクリックして <b>Ctrl + V</b> で貼り付けできます。</p>
+      <p>Snipping Tool でコピー後、このエリアをクリックして <b>Ctrl + V</b> で貼り付けできます。</p>
 
       <div
         ref={pasteZoneRef}
@@ -219,11 +232,10 @@ export default function AssessForm(): JSX.Element {
           placeItems: 'center',
           textAlign: 'center'
         }}
-        aria-label="ここをクリックしてCtrl+Vで貼り付け / 画像をドロップ"
       >
         <div>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>ここをクリックして Ctrl + V で貼り付け</div>
-          <div style={{ fontSize: 12, color: '#555' }}>画像をドラッグ＆ドロップも可</div>
+          <div style={{ fontSize: 12, color: '#555' }}>画像ドラッグ＆ドロップも可</div>
           <div style={{ marginTop: 10 }}>
             <button type="button" onClick={handleClipboardButton}>クリップボードから取得（対応ブラウザ）</button>
           </div>
@@ -246,6 +258,16 @@ export default function AssessForm(): JSX.Element {
         <button onClick={copyText} disabled={!cwText}>コピー</button>
         <button onClick={saveToSupabase}>保存</button>
       </div>
+
+      {/* 警告表示（Z/2 曖昧や IMEI 不正など） */}
+      {warnings.length > 0 && (
+        <div style={{ background:'#FFF3CD', border:'1px solid #FFEC9E', padding:10, borderRadius:6 }}>
+          <b>確認が必要な項目:</b>
+          <ul style={{ margin: '6px 0 0 18px' }}>
+            {warnings.map((w: string, i: number) => <li key={i}>{w}</li>)}
+          </ul>
+        </div>
+      )}
 
       <div style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr 1fr' }}>
         <label>お名前<input value={customerName} onChange={e => setCustomerName(e.target.value)} /></label>
