@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { fetchAmemobaPriceByQuery } from '@/lib/amemoba'
+import { fetchAmemobaPriceByQuery } from '@/lib/amemoba'   // ← ここが絶対にこの形
 
 export async function POST(req: Request) {
   const { query } = await req.json()
