@@ -16,8 +16,15 @@ type Device = {
 }
 
 export default function AssessForm() {
+  // 画像→OCR
   const [imgBase64, setImgBase64] = useState<string | null>(null)
+  // 端末情報
   const [device, setDevice] = useState<Device>({})
+  // お客様情報（最小）
+  const [customerName, setCustomerName] = useState<string>('')
+  const [customerPhone, setCustomerPhone] = useState<string>('')
+
+  // UIメッセージ & Chatwork用テキスト
   const [message, setMessage] = useState<string>('')
   const [cwText, setCwText] = useState<string>('')
 
@@ -71,33 +78,82 @@ export default function AssessForm() {
     setMessage('コピーしました。Chatworkに貼り付けてください。')
   }
 
+  // 🔽 Supabase 保存
+  async function saveToSupabase() {
+    setMessage('保存中…')
+    const payload = {
+      customer: {
+        name: customerName || 'お客様',
+        phone: customerPhone || null
+      },
+      device: {
+        model_name: device.model_name ?? null,
+        model_number: device.model_number ?? null,
+        imei: device.imei ?? null,
+        color: device.color ?? null,
+        capacity: device.capacity ?? null,
+        battery: device.battery ?? null,
+        condition: device.condition ?? null,
+        max_price: device.max_price ?? null,
+        estimated_price: device.estimated_price ?? null,
+        notes: device.notes ?? null
+      },
+      chatwork_text: cwText || null
+    }
+
+    const res = await fetch('/api/assessments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+
+    const json = await res.json()
+    if (json.ok) {
+      setMessage(`保存しました（assessment_id: ${json.assessment_id}）`)
+    } else {
+      setMessage(`保存に失敗しました：${json.error ?? 'unknown'}`)
+    }
+  }
+
   return (
     <div style={{ display: 'grid', gap: 12 }}>
       <h2>査定フォーム</h2>
       <p>3uToolsのスクリーンショットをアップロード → OCRで自動入力</p>
-      {/* Upload box */}
+
+      {/* アップロード */}
       {require('./UploadBox').default({ onImage: (b64: string) => setImgBase64(b64) })}
+
+      {/* 操作ボタン */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button onClick={runOCR} disabled={!imgBase64}>OCR実行</button>
         <button onClick={fetchPrice} disabled={!device.model_name && !device.model_number}>最大価格取得</button>
         <button onClick={buildChatworkText}>Chatwork投稿文を作成</button>
         <button onClick={copyText} disabled={!cwText}>コピー</button>
+        <button onClick={saveToSupabase}>保存</button>
       </div>
 
+      {/* お客様情報 */}
       <div style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr 1fr' }}>
-        <label>機種名<input value={device.model_name || ''} onChange={e => setDevice({...device, model_name: e.target.value})} /></label>
-        <label>容量<input value={device.capacity || ''} onChange={e => setDevice({...device, capacity: e.target.value})} /></label>
-        <label>カラー<input value={device.color || ''} onChange={e => setDevice({...device, color: e.target.value})} /></label>
-        <label>モデル番号<input value={device.model_number || ''} onChange={e => setDevice({...device, model_number: e.target.value})} /></label>
-        <label>IMEI<input value={device.imei || ''} onChange={e => setDevice({...device, imei: e.target.value})} /></label>
-        <label>シリアル<input value={device.serial || ''} onChange={e => setDevice({...device, serial: e.target.value})} /></label>
-        <label>バッテリー<input value={device.battery || ''} onChange={e => setDevice({...device, battery: e.target.value})} /></label>
-        <label>状態<input value={device.condition || ''} onChange={e => setDevice({...device, condition: e.target.value})} /></label>
-        <label style={{ gridColumn: '1 / -1' }}>特記事項<textarea value={device.notes || ''} onChange={e => setDevice({...device, notes: e.target.value})} /></label>
-        <label>最大買取価格<input value={device.max_price ?? ''} onChange={e => setDevice({...device, max_price: Number(e.target.value) || 0})} /></label>
-        <label>査定額<input value={device.estimated_price ?? ''} onChange={e => setDevice({...device, estimated_price: Number(e.target.value) || 0})} /></label>
+        <label>お名前<input value={customerName} onChange={e => setCustomerName(e.target.value)} /></label>
+        <label>電話番号<input value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} /></label>
       </div>
 
+      {/* 端末情報 */}
+      <div style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr 1fr' }}>
+        <label>機種名<input value={device.model_name || ''} onChange={e => setDevice({ ...device, model_name: e.target.value })} /></label>
+        <label>容量<input value={device.capacity || ''} onChange={e => setDevice({ ...device, capacity: e.target.value })} /></label>
+        <label>カラー<input value={device.color || ''} onChange={e => setDevice({ ...device, color: e.target.value })} /></label>
+        <label>モデル番号<input value={device.model_number || ''} onChange={e => setDevice({ ...device, model_number: e.target.value })} /></label>
+        <label>IMEI<input value={device.imei || ''} onChange={e => setDevice({ ...device, imei: e.target.value })} /></label>
+        <label>シリアル<input value={device.serial || ''} onChange={e => setDevice({ ...device, serial: e.target.value })} /></label>
+        <label>バッテリー<input value={device.battery || ''} onChange={e => setDevice({ ...device, battery: e.target.value })} /></label>
+        <label>状態<input value={device.condition || ''} onChange={e => setDevice({ ...device, condition: e.target.value })} /></label>
+        <label style={{ gridColumn: '1 / -1' }}>特記事項<textarea value={device.notes || ''} onChange={e => setDevice({ ...device, notes: e.target.value })} /></label>
+        <label>最大買取価格<input value={device.max_price ?? ''} onChange={e => setDevice({ ...device, max_price: Number(e.target.value) || 0 })} /></label>
+        <label>査定額<input value={device.estimated_price ?? ''} onChange={e => setDevice({ ...device, estimated_price: Number(e.target.value) || 0 })} /></label>
+      </div>
+
+      {/* Chatwork投稿用テキスト */}
       {cwText && (
         <div>
           <h3>Chatwork投稿用テキスト</h3>
