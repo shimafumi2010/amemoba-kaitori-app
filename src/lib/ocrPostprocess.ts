@@ -6,7 +6,6 @@ export type OcrResult = {
   imei?: string
   serial?: string
   battery?: string
-  // 追加: モデルから拾わせた候補群
   imei_candidates?: string[]
   serial_candidates?: string[]
 }
@@ -38,17 +37,12 @@ function selectIMEI(raw?: string, cands?: string[]): { value: string; warning?: 
     onlyDigits(raw || '')
   ])).filter(Boolean)
 
-  // 完全一致候補（15桁&Luhn OK に限定）
   for (const cand of list) {
     if (cand.length === 15 && luhn15(cand)) return { value: cand }
   }
-
-  // 次点：15桁（Luhn NG）→ 警告付きで返す
   for (const cand of list) {
     if (cand.length === 15) return { value: cand, warning: 'IMEIは15桁だがLuhn検証で不一致。再確認を推奨。' }
   }
-
-  // 次点：最長の数字列（14〜17桁）を返す
   const sorted = list.sort((a, b) => b.length - a.length)
   const best = sorted[0] || ''
   if (!best) return { value: '', warning: 'IMEIを抽出できませんでした。' }
@@ -66,7 +60,7 @@ const EQUIV_GROUPS = [
 ]
 function equivCost(a: string, b: string): number {
   if (a === b) return 0
-  for (const g of EQUIV_GROUPS) if (g.has(a) && g.has(b)) return 0.1 // ほぼ同じ扱い
+  for (const g of EQUIV_GROUPS) if (g.has(a) && g.has(b)) return 0.1
   return 1
 }
 
@@ -80,17 +74,13 @@ function selectSerial(raw?: string, cands?: string[]): { value: string; warning?
   if (!list.length) return { value: '', warning: 'シリアルを抽出できませんでした。' }
 
   const score = (cand: string): number => {
-    // 長さ優先（12桁最優先 → それ以外はペナルティ）
     const lenPenalty = cand.length === 12 ? 0 : Math.abs(cand.length - 12) * 1.5
-    // R が空なら長さだけで評価
     if (!R) return lenPenalty
-
-    const A = R.split('')
-    const B = cand.split('')
+    const A = R.split(''); const B = cand.split('')
     const n = Math.min(A.length, B.length)
     let dist = 0
     for (let i = 0; i < n; i++) dist += equivCost(A[i], B[i])
-    dist += Math.abs(A.length - B.length) // 長さ差も距離へ
+    dist += Math.abs(A.length - B.length)
     return lenPenalty + dist
   }
 
@@ -147,4 +137,12 @@ export function postprocessOcr(input: OcrResult): { data: OcrResult; warnings: s
   }
 
   return { data: out, warnings }
+}
+
+/* ===== AssessForm.tsx から直接使えるように公開（ビルドエラー対策） ===== */
+export function normalizeIMEI(raw?: string): string {
+  return selectIMEI(raw, []).value || ''
+}
+export function normalizeSerial(raw?: string): string {
+  return selectSerial(raw, []).value || ''
 }
