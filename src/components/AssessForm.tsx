@@ -80,6 +80,62 @@ export default function AssessForm(): JSX.Element {
     return raw.split(/\s+/)[0] // 先頭のトークンだけ
   }
 
+  // 選択中キャリア → amemoba検索 → 一致リンクを新規タブで開く
+  async function openAmemobaForSelectedCarrier() {
+    const key = (device.model_number || device.model_name || '').trim().split(/\s+/)[0]
+    if (!key) {
+      alert('モデル番号 または 機種名を入力してください')
+      return
+    }
+    if (!device.carrier) {
+      alert('キャリアを選択してください')
+      return
+    }
+
+    // UI上のキャリア → ページ内の表記にマップ
+    // 例：au(KDDI) → "au"、SIMフリー → "simfree"
+    const target = (() => {
+      const c = device.carrier
+      if (c.startsWith('au')) return 'au'
+      if (/softbank/i.test(c)) return 'softbank'
+      if (/docomo/i.test(c)) return 'docomo'
+      if (/SIMフリー/.test(c) || /SIM/.test(c)) return 'simfree'
+      return '' // 未対応は空
+    })()
+
+    setMessage(`amemoba検索中…（${key} / ${device.carrier}）`)
+    try {
+      const res = await fetch('/api/amemoba-search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: key })
+      })
+      const json = await res.json()
+      if (!res.ok || json?.ok === false) {
+        setMessage(`検索失敗: ${json?.error || `${res.status} ${res.statusText}`}`)
+        // 検索一覧だけでも開いておく
+        const fallback = `https://amemoba.com/search/?search-word=${encodeURIComponent(key)}`
+        window.open(fallback, '_blank', 'noopener,noreferrer')
+        return
+      }
+
+      const results: Array<{ title: string; url: string; carrier?: string }> = json.results || []
+      // 1) 完全一致キャリア
+      let hit = results.find(r => r.carrier === target)
+      // 2) docomo/au/softbank/simfree いずれか含むタイトルでゆるく
+      if (!hit && target) hit = results.find(r => (r.title || '').toLowerCase().includes(target))
+      // 3) 見つからなければ検索一覧へ
+      const url = hit?.url || json.searchUrl || `https://amemoba.com/search/?search-word=${encodeURIComponent(key)}`
+      window.open(url, '_blank', 'noopener,noreferrer')
+      setMessage(hit ? `検索完了：${device.carrier} に一致するリンクを開きました` : '検索完了：一致が無かったので検索一覧を開きました')
+    } catch (e: any) {
+      setMessage(`検索失敗: ${e?.message ?? 'unknown'}`)
+      const url = `https://amemoba.com/search/?search-word=${encodeURIComponent(key)}`
+      window.open(url, '_blank', 'noopener,noreferrer')
+    }
+  }
+
+  
   // ----- amemoba のフリーワード検索を新規タブで開く -----
   function openAmemobaSearch() {
     const key = getModelPrefix()
