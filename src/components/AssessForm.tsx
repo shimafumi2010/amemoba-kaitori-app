@@ -73,6 +73,24 @@ export default function AssessForm(): JSX.Element {
     })
   }
 
+  // ----- モデル番号から検索キーワード（半角スペース前）を作る -----
+  function getModelPrefix(): string {
+    const raw = (device.model_number || device.model_name || '').trim()
+    if (!raw) return ''
+    return raw.split(/\s+/)[0] // 先頭のトークンだけ
+  }
+
+  // ----- amemoba のフリーワード検索を新規タブで開く -----
+  function openAmemobaSearch() {
+    const key = getModelPrefix()
+    if (!key) {
+      alert('モデル番号 または 機種名を入力してください')
+      return
+    }
+    const url = `https://amemoba.com/search/?search-word=${encodeURIComponent(key)}`
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
+
   /* 貼り付け */
   async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
     const items = e.clipboardData?.items
