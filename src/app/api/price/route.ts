@@ -1,31 +1,25 @@
 import { NextResponse } from 'next/server'
-import { fetchAmemobaPriceByQuery } from '@/lib/amemoba'
+import { searchAmemobaByModelPrefix } from '@/lib/amemoba'
 
 export async function POST(req: Request) {
   try {
-    const { query } = await req.json() as { query?: string }
+    const { query } = (await req.json()) as { query?: string }
     const q = (query || '').trim()
     if (!q) {
       return NextResponse.json({ ok: false, error: 'query is required' }, { status: 400 })
     }
 
-    const result = await fetchAmemobaPriceByQuery(q)
+    // 価格抽出は行わず、リンク検索に特化
+    const result = await searchAmemobaByModelPrefix(q)
 
-    if (result.price == null) {
-      return NextResponse.json({
-        ok: false,
-        error: '価格が見つかりませんでした',
-        ...result,
-      }, { status: 404 })
+    if (!result.results.length) {
+      return NextResponse.json(
+        { ok: false, error: '該当リンクが見つかりませんでした', ...result },
+        { status: 404 }
+      )
     }
 
-    return NextResponse.json({
-      ok: true,
-      price: result.price,
-      url: result.url,
-      title: result.title,
-      matchedText: result.matchedText,
-    })
+    return NextResponse.json({ ok: true, ...result })
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message ?? 'unknown' }, { status: 500 })
   }
