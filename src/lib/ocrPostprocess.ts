@@ -6,15 +6,23 @@ export type OcrResult = {
   imei?: string
   serial?: string
   battery?: string
+  // 追加: モデルから拾わせた候補群
+  imei_candidates?: string[]
+  serial_candidates?: string[]
 }
 
-/* ---------- IMEI: Luhn 15桁チェック ---------- */
-function luhnCheck15(imei: string): boolean {
+/* ---------------- IMEI ユーティリティ ---------------- */
+
+function onlyDigits(s: string): string {
+  return (s || '').replace(/\D/g, '')
+}
+
+function luhn15(imei: string): boolean {
   if (!/^\d{15}$/.test(imei)) return false
   let sum = 0
   for (let i = 0; i < 15; i++) {
     let d = parseInt(imei[i], 10)
-    if (i % 2 === 1) { // 0始まり偶数位置（人間の偶数桁）が倍
+    if (i % 2 === 1) { // 0始まりの奇数位置を2倍
       d *= 2
       if (d > 9) d -= 9
     }
@@ -23,68 +31,77 @@ function luhnCheck15(imei: string): boolean {
   return sum % 10 === 0
 }
 
-/** 可能なら15桁でLuhn OKのものを返す。警告メッセージも付与 */
-export function normalizeIMEI(raw?: string): { value: string; valid: boolean; warning?: string } {
-  const digits = (raw || '').replace(/\D/g, '')
-  if (!digits) return { value: '', valid: false, warning: 'IMEIが取得できませんでした。' }
+// 候補の中から Luhn OK の15桁を最優先で採用
+function selectIMEI(raw?: string, cands?: string[]): { value: string; warning?: string } {
+  const list = Array.from(new Set([
+    ...(cands || []).map(onlyDigits),
+    onlyDigits(raw || '')
+  ])).filter(Boolean)
 
-  // ちょうど15桁
-  if (digits.length === 15) {
-    const ok = luhnCheck15(digits)
-    return { value: digits, valid: ok, warning: ok ? undefined : 'IMEI(15桁)のLuhn検証に失敗しました。' }
+  // 完全一致候補（15桁&Luhn OK に限定）
+  for (const cand of list) {
+    if (cand.length === 15 && luhn15(cand)) return { value: cand }
   }
 
-  // 15桁より長い → 妥当な15桁の連続部分を探す
-  if (digits.length > 15) {
-    for (let i = 0; i <= digits.length - 15; i++) {
-      const cand = digits.slice(i, i + 15)
-      if (luhnCheck15(cand)) {
-        return { value: cand, valid: true } // ベスト候補
-      }
-    }
-    // 見つからない場合、先頭15桁を返しつつ警告
-    return {
-      value: digits.slice(0, 15),
-      valid: false,
-      warning: `IMEIが15桁超です（${digits.length}桁）。Luhn適合の連続15桁を見つけられませんでした。`
-    }
+  // 次点：15桁（Luhn NG）→ 警告付きで返す
+  for (const cand of list) {
+    if (cand.length === 15) return { value: cand, warning: 'IMEIは15桁だがLuhn検証で不一致。再確認を推奨。' }
   }
 
-  // 15桁未満
-  return {
-    value: digits,
-    valid: false,
-    warning: `IMEIが短いです（${digits.length}桁）。15桁必要です。`
-  }
+  // 次点：最長の数字列（14〜17桁）を返す
+  const sorted = list.sort((a, b) => b.length - a.length)
+  const best = sorted[0] || ''
+  if (!best) return { value: '', warning: 'IMEIを抽出できませんでした。' }
+  return { value: best, warning: `IMEIが15桁ではありません（${best.length}桁）。再確認してください。` }
 }
 
-/* ---------- Serial: 12桁英数字・安全置換＋長さ警告 ---------- */
-export function normalizeSerial(raw?: string): { value: string; warning?: string } {
-  let s = (raw || '')
-    .toUpperCase()
-    .replace(/Ｏ/g, 'O').replace(/Ｉ/g, 'I') // 全角→半角
-    .replace(/０/g, '0').replace(/１/g, '1')
-    .replace(/\s+/g, '')
-    .replace(/[^A-Z0-9]/g, '')
+/* ---------------- Serial ユーティリティ ---------------- */
 
-  // 安全置換（O→0, I→1）。Zは据え置き（2と取り違え防止）
-  s = s.replace(/O/g, '0').replace(/I/g, '1')
-
-  const warns: string[] = []
-  if (s.length !== 12) {
-    warns.push(`シリアルは12桁ですが、現在${s.length}桁です。`)
-  }
-
-  // Z↔2の曖昧さ検知：ほぼ数字列にZが混じるケースを警告
-  const looksNumericWithZ = s.includes('Z') && s.replace(/Z/g, '2').replace(/[A-Y]/g, '').length >= Math.max(1, s.length - 2)
-  if (looksNumericWithZ) {
-    warns.push('シリアル内に「Z」があります。2との誤認の可能性があるため目視確認してください。')
-  }
-
-  return { value: s, warning: warns.length ? warns.join(' ') : undefined }
+// 互換グループ（誤認されやすい文字を同一視）
+const EQUIV_GROUPS = [
+  new Set(['0','O']),
+  new Set(['1','I','L']),
+  new Set(['5','S']),
+  new Set(['2','Z'])
+]
+function equivCost(a: string, b: string): number {
+  if (a === b) return 0
+  for (const g of EQUIV_GROUPS) if (g.has(a) && g.has(b)) return 0.1 // ほぼ同じ扱い
+  return 1
 }
 
-/* ---------- その他の正規化 ---------- */
+// 12桁を最優先、次に11/13桁…で「equiv 距離」が最小のものを採用
+function selectSerial(raw?: string, cands?: string[]): { value: string; warning?: string } {
+  const R = (raw || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+  const list = Array.from(new Set([...(cands || []), R]))
+    .map(s => s.toUpperCase().replace(/[^A-Z0-9]/g, ''))
+    .filter(Boolean)
+
+  if (!list.length) return { value: '', warning: 'シリアルを抽出できませんでした。' }
+
+  const score = (cand: string): number => {
+    // 長さ優先（12桁最優先 → それ以外はペナルティ）
+    const lenPenalty = cand.length === 12 ? 0 : Math.abs(cand.length - 12) * 1.5
+    // R が空なら長さだけで評価
+    if (!R) return lenPenalty
+
+    const A = R.split('')
+    const B = cand.split('')
+    const n = Math.min(A.length, B.length)
+    let dist = 0
+    for (let i = 0; i < n; i++) dist += equivCost(A[i], B[i])
+    dist += Math.abs(A.length - B.length) // 長さ差も距離へ
+    return lenPenalty + dist
+  }
+
+  const sorted = list.slice().sort((a, b) => score(a) - score(b))
+  const best = sorted[0]
+  const warn = best.length !== 12 ? `シリアルは12桁ですが、${best.length}桁が抽出されました。` : undefined
+  return { value: best, warning: warn }
+}
+
+/* ---------------- その他 正規化 ---------------- */
+
 export function normalizeCapacity(raw?: string): string | undefined {
   if (!raw) return undefined
   const cap = raw.replace(/\s+/g, '').replace(/ＴＢ/gi, 'TB').replace(/ＧＢ/gi, 'GB')
@@ -108,23 +125,24 @@ export function normalizeModelNumber(raw?: string): string | undefined {
     .replace(/\s+/g, '')
 }
 
-/* ---------- 総合ポストプロセス ---------- */
+/* ---------------- 総合ポストプロセス ---------------- */
+
 export function postprocessOcr(input: OcrResult): { data: OcrResult; warnings: string[] } {
   const warnings: string[] = []
 
-  const imeiN = normalizeIMEI(input.imei)
-  if (imeiN.warning) warnings.push(imeiN.warning)
+  const imeiSel = selectIMEI(input.imei, input.imei_candidates)
+  if (imeiSel.warning) warnings.push(imeiSel.warning)
 
-  const serialN = normalizeSerial(input.serial)
-  if (serialN.warning) warnings.push(serialN.warning)
+  const serialSel = selectSerial(input.serial, input.serial_candidates)
+  if (serialSel.warning) warnings.push(serialSel.warning)
 
   const out: OcrResult = {
     model_name: input.model_name || undefined,
     capacity: normalizeCapacity(input.capacity),
     color: input.color || undefined,
     model_number: normalizeModelNumber(input.model_number),
-    imei: imeiN.value || undefined,          // 15桁以外は警告済み
-    serial: serialN.value || undefined,      // 12桁以外は警告済み
+    imei: imeiSel.value || undefined,
+    serial: serialSel.value || undefined,
     battery: normalizeBattery(input.battery),
   }
 
