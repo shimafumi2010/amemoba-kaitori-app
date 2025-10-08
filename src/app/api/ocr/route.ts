@@ -12,23 +12,24 @@ type OcrResult = {
 }
 
 /**
- * 3uToolsのスクショをOpenAIに渡して、必要な項目をJSONで返す。
- * - 日本語/英語混在に対応
- * - 返却前に軽く正規化（IMEI / 容量 / バッテリー）
+ * 3uTools のスクショ（dataURL可）を投げて構造化JSONを返す
+ * - TS型エラーを避けるために、messages.content は最小限 any キャスト
  */
 export async function POST(req: Request) {
   try {
-    const { imageBase64 } = await req.json() as { imageBase64: string }
+    const { imageBase64 } = (await req.json()) as { imageBase64: string }
     if (!imageBase64 || typeof imageBase64 !== 'string') {
-      return NextResponse.json({ error: 'imageBase64 is required' }, { status: 400 })
+      return NextResponse.json({ ok: false, error: 'imageBase64 is required' }, { status: 400 })
     }
 
+    // data: スキーマ（dataURL で来てもOK）
+    const isDataUrl = imageBase64.startsWith('data:image/')
+    const imageUrl = isDataUrl ? imageBase64 : imageBase64 // そのまま渡す（外部URLでもOK）
+
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-    const system = [
-      'あなたはリユース端末の査定ツールです。',
-      'ユーザーがアップロードする3uToolsのスクリーンショットから、以下のJSONを厳密に返してください。',
-      '追加の文章は禁止。キーは必ず英語のケンバンで出力。'
-    ].join('\n')
+
+    const systemPrompt =
+      'あなたはリユース端末の査定ツールです。ユーザーがアップロードする3uToolsのスクリーンショットから指定のJSONだけを厳密に返して下さい。追加の説明文は不要。'
 
     const schemaHint = `
 期待するJSONのキー:
@@ -39,23 +40,24 @@ export async function POST(req: Request) {
   "model_number": "MLTE3J/A など (SalesModel / Model)",
   "imei": "15桁の数字",
   "serial": "英数字のシリアル",
-  "battery": "80% のように百分率"
+  "battery": "85% のように百分率"
 }
 
 補助ヒント:
-- 3uTools の表示例: Title/Device 名・SalesModel(=モデル番号)・HardDiskCapacity(=容量)・SerialNumber・IMEI・Battery Life など
+- 3uTools の表示例: Title/Device 名・SalesModel(モデル番号)・HardDiskCapacity(容量)・SerialNumber・IMEI・Battery Life など
 - 表記ゆれ: 容量 "256 GB" → "256GB" に揃える, バッテリー "Battery Life: 85%" → "85%"
 - 取り出せないフィールドは空文字にする
-`
+`.trim()
 
-    const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-      { role: 'system', content: system },
+    // 型が厳しすぎて image_url をはじくバージョンがあるため any で送る
+    const messages: any = [
+      { role: 'system', content: systemPrompt },
       {
         role: 'user',
         content: [
           { type: 'text', text: `以下の画像から、指定のJSONだけを返してください。\n${schemaHint}\n出力はJSONのみ。` },
-          // data URL のまま渡してOK
-          { type: 'image_url', image_url: imageBase64 }
+          // data URL をそのまま渡す
+          { type: 'image_url', image_url: { url: imageUrl } }
         ]
       }
     ]
@@ -68,31 +70,29 @@ export async function POST(req: Request) {
 
     let content = resp.choices?.[0]?.message?.content ?? ''
     if (!content) {
-      return NextResponse.json({ error: 'Empty OCR response' }, { status: 500 })
+      return NextResponse.json({ ok: false, error: 'Empty OCR response' }, { status: 500 })
     }
 
-    // ---- JSON抽出（モデルが前後に説明文を付ける対策）----
+    // JSON部分を抽出（万一前後に文章がついた場合の保険）
     const jsonMatch = content.match(/\{[\s\S]*\}/)
     if (jsonMatch) content = jsonMatch[0]
 
-    let parsed: OcrResult
+    let parsed: OcrResult = {}
     try {
       parsed = JSON.parse(content) as OcrResult
     } catch {
-      // どうしてもパースできない場合は空オブジェクト
       parsed = {}
     }
 
     // ---- 正規化 ----
     const normalized: OcrResult = { ...parsed }
 
-    // 容量: "256 GB" → "256GB"、"1 TB"→"1TB"
+    // 容量: "256 GB" → "256GB", "1 TB" → "1TB"
     if (normalized.capacity) {
       const cap = normalized.capacity
         .replace(/\s+/g, '')
         .replace(/ＴＢ/gi, 'TB')
         .replace(/ＧＢ/gi, 'GB')
-      // 末尾にGB/TBがない場合は数値だけ抽出してGB付与（安全側）
       const m = cap.match(/^(\d+(?:\.\d+)?)(GB|TB)$/i) || cap.match(/^(\d+(?:\.\d+)?)/)
       if (m) {
         const num = m[1]
@@ -101,13 +101,13 @@ export async function POST(req: Request) {
       }
     }
 
-    // IMEI: 最初の15桁を採用
+    // IMEI: 最初の15桁
     if (normalized.imei) {
       const m = normalized.imei.replace(/\D/g, '').match(/(\d{15})/)
       if (m) normalized.imei = m[1]
     }
 
-    // バッテリー: "85%" or "85" に揃える（UIで%を付けてもOK）
+    // バッテリー: "85%" or "85" → "85%"
     if (normalized.battery) {
       const m = normalized.battery.match(/(\d{2,3})\s*%?/)
       if (m) normalized.battery = `${m[1]}%`
@@ -116,7 +116,7 @@ export async function POST(req: Request) {
     // モデル番号: 全角→半角, スペース削除
     if (normalized.model_number) {
       normalized.model_number = normalized.model_number
-        .replace(/[Ａ-Ｚａ-ｚ０-９／]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
+        .replace(/[Ａ-Ｚａ-ｚ０-９／]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
         .replace(/\s+/g, '')
     }
 
