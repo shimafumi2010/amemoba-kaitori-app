@@ -1,6 +1,6 @@
 // src/components/AssessForm.tsx
 'use client'
-import React, { useState, useEffect } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { normalizeIMEI, normalizeSerial } from '../lib/ocrPostprocess'
 
 const STAFFS = ['島野文宏', '島野ひとみ', '中田颯', '（その他）'] as const
@@ -21,13 +21,12 @@ type GeoRow = {
   title: string
   url?: string
   carrier?: string
-  unused?: number
-  used?: number
   unusedText?: string
   usedText?: string
 }
 
-type BBox = { x: number; y: number; w: number; h: number } | null
+type BBox = { x: number; y: number; w: number; h: number }
+type MaybeBBox = BBox | null
 
 const section: React.CSSProperties = { border: '1px solid #e5e7eb', borderRadius: 10, padding: 12, background: '#fff' }
 const label: React.CSSProperties = { fontWeight: 600, fontSize: 13 }
@@ -35,7 +34,7 @@ const box: React.CSSProperties = { width: '100%', padding: '8px 10px', border: '
 const row2 = { display: 'grid', gridTemplateColumns: '160px 1fr', gap: 10, alignItems: 'center' } as const
 const row4 = { display: 'grid', gridTemplateColumns: '160px 1fr 160px 1fr', gap: 10, alignItems: 'center' } as const
 
-async function cropFromBase64ByBbox(imageBase64: string, bbox: { x: number; y: number; w: number; h: number }): Promise<string | null> {
+async function cropFromBase64ByBbox(imageBase64: string, bbox: BBox): Promise<string | null> {
   return new Promise((resolve) => {
     const img = new Image()
     img.onload = () => {
@@ -55,7 +54,6 @@ async function cropFromBase64ByBbox(imageBase64: string, bbox: { x: number; y: n
   })
 }
 
-/** 画像を最大幅 1400px に縮小してから base64 返す（貼り付けサイズ最適化） */
 async function downscaleBase64(dataUrl: string, maxW = 1400): Promise<string> {
   return new Promise((resolve) => {
     const img = new Image()
@@ -86,12 +84,25 @@ function fileToBase64(file: File) {
   })
 }
 
+type SaveItem = {
+  id: string
+  savedAt: string
+  staff: string
+  acceptedAt: string
+  customer: { name: string; kana: string; address: string; phone: string; birth: string }
+  device: {
+    model_name: string; capacity: string; color: string; model_number: string
+    imei: string; serial: string; battery: string; carrier: string; restrict: string
+  }
+  notes: string
+}
+
 export default function AssessForm(): JSX.Element {
   // 受付
   const [staff, setStaff] = useState('島野ひとみ')
   const [acceptedAt, setAcceptedAt] = useState(() => new Date().toISOString().slice(0, 10))
 
-  // お客様情報（今は手入力；将来フォーム連携）
+  // お客様情報
   const [customerSelect, setCustomerSelect] = useState('（最新が先頭）')
   const [customer, setCustomer] = useState({ name: '', kana: '', address: '', phone: '', birth: '' })
 
@@ -102,16 +113,11 @@ export default function AssessForm(): JSX.Element {
   })
 
   // 付属品/ロック/状態
-  const [acc, setAcc] = useState('')
-  const [simLock, setSimLock] = useState('')
-  const [actLock, setActLock] = useState('')
-  const [condition, setCondition] = useState('B')
-  const [conditionNote, setConditionNote] = useState('')
+  const [acc, setAcc] = useState(''); const [simLock, setSimLock] = useState(''); const [actLock, setActLock] = useState('')
+  const [condition, setCondition] = useState('B'); const [conditionNote, setConditionNote] = useState('')
 
   // 価格
-  const [maxPrice, setMaxPrice] = useState<number | ''>('')
-  const [discount, setDiscount] = useState<number | ''>('')
-  const [todayPrice, setTodayPrice] = useState<number>(0)
+  const [maxPrice, setMaxPrice] = useState<number | ''>(''); const [discount, setDiscount] = useState<number | ''>(''); const [todayPrice, setTodayPrice] = useState<number>(0)
 
   // 競合（ゲオ）
   const [geoLoading, setGeoLoading] = useState(false)
@@ -126,14 +132,23 @@ export default function AssessForm(): JSX.Element {
   const [cropLoading, setCropLoading] = useState(false)
   const [imeiCrop, setImeiCrop] = useState<string | null>(null)
   const [serialCrop, setSerialCrop] = useState<string | null>(null)
-  const [imeiBBox, setImeiBBox] = useState<BBox>(null)
-  const [serialBBox, setSerialBBox] = useState<BBox>(null)
+  const [imeiBBox, setImeiBBox] = useState<MaybeBBox>(null)
+  const [serialBBox, setSerialBBox] = useState<MaybeBBox>(null)
+
+  // 保存/検索
+  const [query, setQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<SaveItem[]>([])
 
   useEffect(() => {
     const max = typeof maxPrice === 'number' ? maxPrice : Number(maxPrice || 0)
     const disc = typeof discount === 'number' ? discount : Number(discount || 0)
     setTodayPrice(Math.max(0, max - disc))
   }, [maxPrice, discount])
+
+  // キャリア変更時はゲオ結果をクリア（指摘4の挙動修正）
+  useEffect(() => {
+    setGeoResult(null)
+  }, [device.carrier])
 
   /** 貼り付け（Snipping Tool → Ctrl+V） */
   async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
@@ -168,14 +183,12 @@ export default function AssessForm(): JSX.Element {
         const res = await fetch('/api/ocr', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ imageBase64: imgBase64, mode: 'extractInfo' }),
+          body: JSON.stringify({ imageBase64: imgBase64 }),
         })
 
         const text = await res.text()
         let json: any = null
-        try {
-          json = JSON.parse(text)
-        } catch {
+        try { json = JSON.parse(text) } catch {
           setMessage(`OCR失敗：応答がJSONではありません / ${text.slice(0, 140)}…`)
           return
         }
@@ -192,16 +205,19 @@ export default function AssessForm(): JSX.Element {
           return
         }
 
-        // ===== 成功：新フィールドも含めて反映 =====
         const fields = json.fields ?? {}
         const bboxes = json.bboxes ?? {}
 
-        setImeiBBox(bboxes?.imei?.[0] ?? bboxes?.IMEI?.[0] ?? null)
-        setSerialBBox(bboxes?.serial?.[0] ?? bboxes?.Serial?.[0] ?? null)
+        // bbox は配列で返ってくる前提。1件目だけ使う
+        const imeiArr: BBox[] = Array.isArray(bboxes?.imei) ? bboxes.imei : []
+        const serialArr: BBox[] = Array.isArray(bboxes?.serial) ? bboxes.serial : []
+        setImeiBBox(imeiArr[0] ?? null)
+        setSerialBBox(serialArr[0] ?? null)
 
         const imeiNorm = normalizeIMEI((fields.imeiCandidates?.[0] ?? '') as string) || ''
         const serialNorm = normalizeSerial((fields.serialCandidates?.[0] ?? '') as string) || ''
         const modelFront = (fields.modelCandidates?.[0] ?? '').toString()
+        const modelFull = (fields.modelNumberFull ?? '').toString().trim()
 
         const modelName = (fields.modelName ?? '').toString().trim()
         const capacity = (fields.capacity ?? '').toString().trim()
@@ -217,7 +233,8 @@ export default function AssessForm(): JSX.Element {
           model_name: modelName || d.model_name,
           capacity: capacity || d.capacity,
           color: color || d.color,
-          model_number: modelFront || d.model_number,
+          // モデル番号は「フル」を優先（例：MWC62 J/A）
+          model_number: modelFull || modelFront || d.model_number,
           imei: imeiNorm || d.imei,
           serial: serialNorm || d.serial,
           battery: batteryPct || d.battery,
@@ -227,7 +244,6 @@ export default function AssessForm(): JSX.Element {
         return
       }
 
-      // ここまで来たら全リトライ失敗
       setMessage('OCR失敗：レート制限により再試行回数を超えました。しばらくしてから実行してください。')
     } catch (e: any) {
       setMessage(`OCR失敗：${e?.message ?? 'unknown error'}`)
@@ -239,16 +255,20 @@ export default function AssessForm(): JSX.Element {
   /** 画像からIMEI/シリアルを切り抜き（bbox → crop） */
   async function runCrop() {
     if (!imgBase64) { setMessage('先に画像を貼り付けてください'); return }
-    if (!imeiBBox && !serialBBox) { setMessage('先に「機種情報取得・反映」を実行してbboxを取得してください'); return }
+    // bbox は null ではない && 幅高さが正 ⇒ 実行
+    const hasImei = !!(imeiBBox && imeiBBox.w > 0 && imeiBBox.h > 0)
+    const hasSerial = !!(serialBBox && serialBBox.w > 0 && serialBBox.h > 0)
+    if (!hasImei && !hasSerial) { setMessage('先に「機種情報取得・反映」を実行してbboxを取得してください'); return }
+
     setCropLoading(true)
     setMessage('切り抜き実行中…')
     try {
-      if (imeiBBox) {
-        const url = await cropFromBase64ByBbox(imgBase64, imeiBBox as any)
+      if (hasImei && imeiBBox) {
+        const url = await cropFromBase64ByBbox(imgBase64, imeiBBox)
         if (url) setImeiCrop(url)
       }
-      if (serialBBox) {
-        const url = await cropFromBase64ByBbox(imgBase64, serialBBox as any)
+      if (hasSerial && serialBBox) {
+        const url = await cropFromBase64ByBbox(imgBase64, serialBBox)
         if (url) setSerialCrop(url)
       }
       setMessage('切り抜き完了：右のプレビューで確認できます')
@@ -259,16 +279,16 @@ export default function AssessForm(): JSX.Element {
     }
   }
 
-  function getModelPrefix(): string {
-    const raw = (device.model_number || device.model_name || '').trim()
-    if (!raw) return ''
-    return raw.split(/\s+/)[0]
-  }
+  // モデル番号の「前半5文字（英数）」だけを抽出（amemoba検索用）
+  const modelPrefix = useMemo(() => {
+    const raw = (device.model_number || '').toUpperCase()
+    const m = raw.match(/[A-Z0-9]{5}/)
+    return m ? m[0] : ''
+  }, [device.model_number])
 
-  /** amemoba 検索 — 新APIに合わせて送信＆オープン */
   async function openAmemobaForSelectedCarrier() {
-    const key = getModelPrefix()
-    if (!key) { alert('モデル番号 または 機種名を入力してください'); return }
+    const key = modelPrefix
+    if (!key) { alert('モデル番号（先頭5桁）が取得できません'); return }
     if (!device.carrier) { alert('キャリアを選択してください'); return }
 
     setMessage(`amemoba検索中…（${key} / ${device.carrier}）`)
@@ -281,8 +301,7 @@ export default function AssessForm(): JSX.Element {
       if (!res.ok || json?.ok === false) {
         setMessage(`検索失敗: ${json?.error || `${res.status} ${res.statusText}`}`)
         const fallback = `https://amemoba.com/search/?search-word=${encodeURIComponent(key)}`
-        window.open(fallback, '_blank', 'noopener,noreferrer')
-        return
+        window.open(fallback, '_blank', 'noopener,noreferrer'); return
       }
       const url = json.firstLink || json.searchUrl || `https://amemoba.com/search/?search-word=${encodeURIComponent(key)}`
       window.open(url, '_blank', 'noopener,noreferrer')
@@ -294,41 +313,37 @@ export default function AssessForm(): JSX.Element {
     }
   }
 
-  /** GEO 価格取得 — 新APIに合わせて送信 */
+  /** GEO 価格取得（キャリアをAPIへ渡す＆毎回リフレッシュ） */
   async function fetchGeo() {
-    const key = getModelPrefix()
+    const key = modelPrefix
     setGeoError(null); setGeoResult(null); setGeoLoading(true)
     try {
       const res = await fetch('/api/geo-prices', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ modelPrefix: key }),
+        body: JSON.stringify({ modelPrefix: key, carrier: device.carrier }),
       })
       const text = await res.text()
       let json: any = null
       try { json = JSON.parse(text) } catch {
         setGeoError(`応答がJSONではありません: HTTP ${res.status} ${res.statusText} / ${text.slice(0, 140)}…`)
-        setGeoLoading(false)
-        return
+        setGeoLoading(false); return
       }
       setGeoSearchUrl(json?.geoUrl ?? null)
       if (!res.ok || json?.ok === false) {
         setGeoError(json?.error || `HTTP ${res.status} ${res.statusText}`)
-        setGeoLoading(false)
-        return
+        setGeoLoading(false); return
       }
-      const row: GeoRow = {
-        title: '検索結果',
+      const hit: GeoRow = {
+        title: json?.carrier ? `キャリア:${json.carrier}` : 'キャリア不明',
         url: json?.geoUrl ?? undefined,
-        carrier: undefined,
+        carrier: json?.carrier ?? undefined,
         unusedText: json?.prices?.unused ?? undefined,
         usedText: json?.prices?.used ?? undefined,
       }
-      setGeoResult(row)
+      setGeoResult(hit)
     } catch (e: any) {
       setGeoError(e?.message ?? 'unknown')
-    } finally {
-      setGeoLoading(false)
-    }
+    } finally { setGeoLoading(false) }
   }
 
   async function copyAndOpen(text: string, url: string) {
@@ -336,8 +351,64 @@ export default function AssessForm(): JSX.Element {
     window.open(url, '_blank', 'noopener,noreferrer')
   }
 
+  /** PDF 出力（簡易：現在のフォームを新窓に描画して印刷） */
+  function exportPdf() {
+    const node = document.getElementById('assess-root')
+    if (!node) return
+    const w = window.open('', '_blank', 'noopener,noreferrer')
+    if (!w) return
+    w.document.write(`<html><head><title>査定受付票</title>
+      <style>
+        body{font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif;}
+        *{box-sizing:border-box}
+        .section{border:1px solid #e5e7eb;border-radius:10px;padding:12px;margin:8px 0}
+        .row{display:grid;grid-template-columns:160px 1fr 160px 1fr;gap:10px;align-items:center}
+        .row2{display:grid;grid-template-columns:160px 1fr;gap:10px;align-items:center}
+        .label{font-weight:700;font-size:12px}
+        .box{border:1px solid #d1d5db;border-radius:8px;padding:6px 10px}
+        img{max-width:100%}
+        @page { size: A4; margin: 12mm; }
+      </style>
+    </head><body>${node.innerHTML}</body></html>`)
+    w.document.close()
+    w.focus()
+    w.print()
+  }
+
+  /** 保存（localStorage） */
+  function saveCurrent() {
+    const payload: SaveItem = {
+      id: crypto.randomUUID(),
+      savedAt: new Date().toISOString(),
+      staff, acceptedAt,
+      customer,
+      device,
+      notes: conditionNote,
+    }
+    const key = 'amemoba-assess-saves'
+    const list: SaveItem[] = JSON.parse(localStorage.getItem(key) || '[]')
+    list.unshift(payload)
+    localStorage.setItem(key, JSON.stringify(list))
+    setMessage('保存しました')
+  }
+
+  /** 検索（localStorage） */
+  function searchSaved(q: string) {
+    const key = 'amemoba-assess-saves'
+    const list: SaveItem[] = JSON.parse(localStorage.getItem(key) || '[]')
+    const lc = q.trim().toLowerCase()
+    const hits = list.filter(it => {
+      const fields = [
+        it.customer.name, it.customer.kana, it.customer.phone,
+        it.device.model_name, it.device.model_number, it.device.imei, it.device.serial,
+      ].join(' ').toLowerCase()
+      return fields.includes(lc)
+    })
+    setSearchResults(hits.slice(0, 30))
+  }
+
   return (
-    <div style={{ display: 'grid', gap: 16, padding: 16, maxWidth: 980, margin: '0 auto', background: '#f6f7fb' }}>
+    <div id="assess-root" style={{ display: 'grid', gap: 16, padding: 16, maxWidth: 980, margin: '0 auto', background: '#f6f7fb' }}>
       <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, textAlign: 'center' }}>アメモバ買取 富山店　査定受付票</h2>
 
       {/* 受付 */}
@@ -407,6 +478,14 @@ export default function AssessForm(): JSX.Element {
             {cropLoading ? '切り抜き中…' : '画像からIMEI/シリアルを切り抜き'}
           </button>
 
+          <button onClick={exportPdf} style={{ padding:'6px 12px', borderRadius:8, border:'1px solid #ddd' }}>
+            PDF出力
+          </button>
+
+          <button onClick={saveCurrent} style={{ padding:'6px 12px', borderRadius:8, border:'1px solid #ddd' }}>
+            保存
+          </button>
+
           <div style={{ color: '#2563eb', fontSize: 13 }}>{message}</div>
         </div>
       </div>
@@ -467,7 +546,7 @@ export default function AssessForm(): JSX.Element {
         </div>
       </div>
 
-      {/* 価格・検索・競合価格（復活） */}
+      {/* 価格・検索・競合価格 */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>MAX買取価格</div><input style={box as any} placeholder="例）51000" value={maxPrice} onChange={(e)=>setMaxPrice(e.target.value as any)}/>
@@ -481,15 +560,15 @@ export default function AssessForm(): JSX.Element {
           <div style={{ display:'flex', alignItems:'center', gap:8 }}>
             <button onClick={openAmemobaForSelectedCarrier}
                     style={{ padding:'8px 12px', borderRadius:8, border:'1px solid #ddd' }}>
-              amemoba価格検索（{getModelPrefix() || 'キーワード未入力'} / {device.carrier || 'キャリア未選択'}）
+              amemoba価格検索（{modelPrefix || 'キーワード未入力'} / {device.carrier || 'キャリア未選択'}）
             </button>
-            <div style={{ color:'#6b7280', fontSize:12 }}>例：MLJH3 J/A → MLJH3 で検索</div>
+            <div style={{ color:'#6b7280', fontSize:12 }}>例：MWC62 J/A → 検索は「MWC62」で実施</div>
           </div>
 
           <div style={{ border:'1px dashed #d1d5db', borderRadius:10, padding:8 }}>
             <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
               <div style={{ fontWeight:700 }}>競合価格（ゲオ）</div>
-              <button onClick={fetchGeo} disabled={!getModelPrefix()} style={{ padding:'4px 8px', borderRadius:6, border:'1px solid #ddd' }}>
+              <button onClick={fetchGeo} disabled={!modelPrefix} style={{ padding:'4px 8px', borderRadius:6, border:'1px solid #ddd' }}>
                 {geoLoading ? '更新中…' : '更新'}
               </button>
               {geoSearchUrl && <a href={geoSearchUrl} target="_blank" rel="noreferrer" style={{ color:'#2563eb', fontSize:12 }}>検索ページ</a>}
@@ -498,20 +577,16 @@ export default function AssessForm(): JSX.Element {
             {geoError && <div style={{ color:'#b91c1c', fontSize:12 }}>取得失敗：{geoError}</div>}
 
             {!geoError && geoResult && (
-              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:6, fontSize:14 }}>
+              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:6, fontSize:14 }}>
                 <div><span style={{ color:'#6b7280' }}>キャリア：</span>{geoResult.carrier || '不明'}</div>
-                <div><span style={{ color:'#6b7280' }}>未使用：</span>
-                  {geoResult.unusedText ? `¥${geoResult.unusedText}` : (geoResult.unused ? `¥${geoResult.unused.toLocaleString()}` : '-')}
-                </div>
-                <div><span style={{ color:'#6b7280' }}>中古：</span>
-                  {geoResult.usedText ? `¥${geoResult.usedText}` : (geoResult.used ? `¥${geoResult.used.toLocaleString()}` : '-')}
-                </div>
-                <div style={{ gridColumn:'1 / -1', fontSize:12 }}>
+                <div style={{ gridColumn:'1 / -1' }}>
                   <span style={{ color:'#6b7280' }}>商品：</span>
                   {geoResult.url
                     ? <a href={geoResult.url} target="_blank" rel="noreferrer" style={{ color:'#2563eb' }}>{geoResult.title}</a>
                     : geoResult.title}
                 </div>
+                <div><span style={{ color:'#6b7280' }}>未使用：</span>{geoResult.unusedText || '-'}</div>
+                <div><span style={{ color:'#6b7280' }}>中古：</span>{geoResult.usedText || '-'}</div>
               </div>
             )}
             {!geoError && !geoResult && !geoLoading && <div style={{ color:'#6b7280', fontSize:12 }}>未取得（「更新」を押してください）</div>}
@@ -551,6 +626,26 @@ export default function AssessForm(): JSX.Element {
                     placeholder="例）液晶傷あり、Face ID不良 など"
                     value={conditionNote} onChange={(e)=>setConditionNote(e.target.value)} />
         </div>
+      </div>
+
+      {/* 保存検索 */}
+      <div style={section}>
+        <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+          <div style={label}>保存データ検索</div>
+          <input style={box as any} placeholder="名前/IMEI/シリアル/型番 など"
+                 value={query}
+                 onChange={(e)=>{ setQuery(e.target.value); searchSaved(e.target.value) }} />
+        </div>
+        {searchResults.length > 0 && (
+          <div style={{ marginTop:8 }}>
+            {searchResults.map(it => (
+              <div key={it.id} style={{ borderTop:'1px solid #eee', padding:'6px 0', fontSize:13 }}>
+                <div><b>{it.customer.name}</b>（{new Date(it.savedAt).toLocaleString()}）</div>
+                <div style={{ color:'#6b7280' }}>{it.device.model_name} / {it.device.model_number} / IMEI: {it.device.imei}</div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
