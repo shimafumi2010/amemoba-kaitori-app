@@ -1,22 +1,24 @@
 'use client'
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { normalizeIMEI, normalizeSerial } from '../lib/ocrPostprocess'
 
-const STAFFS = ['島野文宏', '島野ひとみ', '中田颯', '（その他）'] as const
-const ACCESSORIES = ['有', '無', ''] as const
-const LOCK_YN = ['無', '有', ''] as const
-const CONDITIONS = [
-  { code: 'S', label: 'S（新品未使用）' },
-  { code: 'A', label: 'A（交換未使用品・新品同様品）' },
-  { code: 'B', label: 'B（目立つ傷なく、使用感が少ない）' },
-  { code: 'C', label: 'C（目に見える傷、使用感がある）' },
-  { code: 'D', label: 'D（目立つ傷、使用感が多数ある）' },
-  { code: 'ジャンク', label: 'ジャンク' },
-] as const
-const CARRIERS = ['SoftBank', 'au(KDDI)', 'docomo', '楽天モバイル', 'SIMフリー'] as const
-const RESTRICTS = ['○', '△', '×', '-'] as const
-
-type GeoRow = { title: string; url?: string; carrier?: string; unused?: number; used?: number; unusedText?: string; usedText?: string }
+type BBox = { x: number; y: number; w: number; h: number }
+type OcrPayload = {
+  model_name?: string
+  capacity?: string
+  color?: string
+  model_number?: string
+  imei?: string
+  serial?: string
+  battery?: string
+}
+type OcrResponse = {
+  ok: boolean
+  data?: OcrPayload
+  bboxes?: Partial<Record<'model_number' | 'imei' | 'serial' | 'header', BBox>>
+  error?: string
+  retryAfterSeconds?: number
+}
 
 const section: React.CSSProperties = { border: '1px solid #e5e7eb', borderRadius: 10, padding: 12, background: '#fff' }
 const label: React.CSSProperties = { fontWeight: 600, fontSize: 13 }
@@ -24,237 +26,269 @@ const box: React.CSSProperties = { width: '100%', padding: '8px 10px', border: '
 const row2 = { display: 'grid', gridTemplateColumns: '160px 1fr', gap: 10, alignItems: 'center' } as const
 const row4 = { display: 'grid', gridTemplateColumns: '160px 1fr 160px 1fr', gap: 10, alignItems: 'center' } as const
 
+async function fileToBase64(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(r.result as string)
+    r.onerror = reject
+    r.readAsDataURL(file)
+  })
+}
+
+/** 画像を最大幅 1400px に縮小してから base64 返す（貼り付けサイズ最適化） */
+async function downscaleBase64(dataUrl: string, maxW = 1400): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      const scale = img.width > maxW ? maxW / img.width : 1
+      if (scale >= 1) return resolve(dataUrl)
+      const w = Math.round(img.width * scale)
+      const h = Math.round(img.height * scale)
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')!
+      ctx.imageSmoothingQuality = 'high'
+      ctx.drawImage(img, 0, 0, w, h)
+      resolve(canvas.toDataURL('image/jpeg', 0.9))
+    }
+    img.onerror = () => resolve(dataUrl)
+    img.src = dataUrl
+  })
+}
+
+/** base64画像の一部を bbox(0..1) で切り出す */
+async function cropFromBase64(imageBase64: string, bbox: BBox): Promise<string | null> {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      const sx = Math.max(0, Math.round(bbox.x * img.width))
+      const sy = Math.max(0, Math.round(bbox.y * img.height))
+      const sw = Math.max(1, Math.round(bbox.w * img.width))
+      const sh = Math.max(1, Math.round(bbox.h * img.height))
+      const out = document.createElement('canvas')
+      out.width = sw
+      out.height = sh
+      const ctx = out.getContext('2d')!
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh)
+      resolve(out.toDataURL('image/png'))
+    }
+    img.onerror = () => resolve(null)
+    img.src = imageBase64
+  })
+}
+
 export default function AssessForm(): JSX.Element {
-  // 受付
-  const [staff, setStaff] = useState('島野ひとみ')
-  const [acceptedAt, setAcceptedAt] = useState(() => new Date().toISOString().slice(0, 10))
-
-  // お客様情報（今は手入力；将来フォーム連携）
-  const [customerSelect, setCustomerSelect] = useState('（最新が先頭）')
-  const [customer, setCustomer] = useState({ name: '', kana: '', address: '', phone: '', birth: '' })
-
-  // 端末
+  // メインフォーム状態
   const [device, setDevice] = useState({
-    model_name: '', capacity: '', color: '', model_number: '',
-    imei: '', serial: '', battery: '', carrier: '', restrict: ''
+    model_name: '', capacity: '', color: '',
+    model_number: '', imei: '', serial: '',
+    battery: ''
   })
 
-  // 状態/付属品
-  const [acc, setAcc] = useState(''); const [simLock, setSimLock] = useState(''); const [actLock, setActLock] = useState('')
-  const [condition, setCondition] = useState('B'); const [conditionNote, setConditionNote] = useState('')
-
-  // 価格
-  const [maxPrice, setMaxPrice] = useState<number | ''>(''); const [discount, setDiscount] = useState<number | ''>(''); const [todayPrice, setTodayPrice] = useState<number>(0)
-
-  // 競合（ゲオ）
-  const [geoLoading, setGeoLoading] = useState(false)
-  const [geoError, setGeoError] = useState<string | null>(null)
-  const [geoResult, setGeoResult] = useState<GeoRow | null>(null)
-  const [geoSearchUrl, setGeoSearchUrl] = useState<string | null>(null)
-
-  // メッセージ
+  // 画像 & OCR
+  const [imgBase64, setImgBase64] = useState<string | null>(null)
   const [message, setMessage] = useState('')
+  const [ocrLoading, setOcrLoading] = useState(false)
 
+  // bbox & 切り抜きプレビュー（「②の部分」を貼る）
+  const [bboxModel, setBboxModel] = useState<BBox | null>(null)
+  const [bboxImei, setBboxImei] = useState<BBox | null>(null)
+  const [bboxSerial, setBboxSerial] = useState<BBox | null>(null)
+  const [cropModel, setCropModel] = useState<string | null>(null)
+  const [cropImei, setCropImei] = useState<string | null>(null)
+  const [cropSerial, setCropSerial] = useState<string | null>(null)
+
+  // 画像貼り付け（Snipping Tool → Ctrl+V）
+  async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
+    const items = e.clipboardData?.items
+    if (!items) return
+    for (const it of items) {
+      if (it.type.startsWith('image/')) {
+        const f = it.getAsFile()
+        if (!f) continue
+        const raw = await fileToBase64(f)
+        const light = await downscaleBase64(raw, 1400)
+        setImgBase64(light)
+        setMessage('画像貼り付け完了。「機種情報取得・反映」を押してください')
+        e.preventDefault()
+        return
+      }
+    }
+  }
+
+  // 画像選択（ファイル選択でもOK）
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]
+    if (!f) return
+    const raw = await fileToBase64(f)
+    const light = await downscaleBase64(raw, 1400)
+    setImgBase64(light)
+    setMessage('画像読み込み完了。「機種情報取得・反映」を押してください')
+  }
+
+  // OCR 実行（JSONのみ返す API）
+  async function runOCR() {
+    if (!imgBase64 || ocrLoading) return
+    setOcrLoading(true)
+    setMessage('機種情報取得中…')
+    try {
+      const res = await fetch('/api/ocr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageBase64: imgBase64 })
+      })
+      const text = await res.text()
+      let json: OcrResponse
+      try { json = JSON.parse(text) } catch {
+        setMessage(`OCR失敗：応答がJSONではありません / ${text.slice(0, 140)}…`)
+        return
+      }
+      if (!json.ok) {
+        if (json.error === 'RATE_LIMIT' && typeof json.retryAfterSeconds === 'number') {
+          setMessage(`OCR失敗：レート制限。${Math.ceil(json.retryAfterSeconds)}秒後に再度お試しください。`)
+        } else {
+          setMessage(`OCR失敗：${json.error || 'unknown'}`)
+        }
+        return
+      }
+
+      const p = json.data || {}
+
+      // 安全な正規化
+      const imeiNorm = normalizeIMEI(p.imei || '')
+      const serialNorm = normalizeSerial(p.serial || '')
+
+      setDevice(d => ({
+        ...d,
+        model_name: p.model_name ?? d.model_name,
+        capacity: p.capacity ?? d.capacity,
+        color: p.color ?? d.color,
+        model_number: p.model_number ?? d.model_number,
+        imei: imeiNorm || p.imei || d.imei,
+        serial: serialNorm || p.serial || d.serial,
+        battery: p.battery ?? d.battery
+      }))
+
+      // bbox 受け取り（0..1 正規化想定）
+      const bb = json.bboxes || {}
+      setBboxModel(bb.model_number || null)
+      setBboxImei(bb.imei || null)
+      setBboxSerial(bb.serial || null)
+
+      setMessage('OCR完了：必要項目を反映しました（切り抜きは別ボタンで実行）')
+    } catch (e: any) {
+      setMessage(`OCR失敗：${e?.message ?? 'unknown error'}`)
+    } finally {
+      setOcrLoading(false)
+    }
+  }
+
+  // ②の部分を切り抜いてプレビューに出す
+  async function runCrop() {
+    if (!imgBase64) return setMessage('先に画像を貼り付けてください')
+    if (!bboxModel && !bboxImei && !bboxSerial) return setMessage('先に「機種情報取得・反映」を実行してbboxを取得してください')
+
+    setMessage('切り抜き実行中…')
+    try {
+      if (bboxModel) setCropModel(await cropFromBase64(imgBase64, bboxModel))
+      if (bboxImei) setCropImei(await cropFromBase64(imgBase64, bboxImei))
+      if (bboxSerial) setCropSerial(await cropFromBase64(imgBase64, bboxSerial))
+      setMessage('切り抜き完了：各入力欄の右にプレビューを表示しました')
+    } catch (e: any) {
+      setMessage(`切り抜き失敗：${e?.message ?? 'unknown error'}`)
+    }
+  }
+
+  // 本日価格の簡易計算（ダミー）
+  const [maxPrice, setMaxPrice] = useState<number | ''>(''); const [discount, setDiscount] = useState<number | ''>(''); const [todayPrice, setTodayPrice] = useState<number>(0)
   useEffect(() => {
     const max = typeof maxPrice === 'number' ? maxPrice : Number(maxPrice || 0)
     const disc = typeof discount === 'number' ? discount : Number(discount || 0)
     setTodayPrice(Math.max(0, max - disc))
   }, [maxPrice, discount])
 
-  // ========= クリップボード（Snipping Tool: すべてのテキストをコピー） =========
-  // インデックスは1始まりで指定 → 実装では0始まりに変換
-  function parseByFixedOrder(text: string) {
-    const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean)
-    const get = (oneBased: number) => {
-      const i = oneBased - 1
-      return i >= 0 && i < lines.length ? lines[i] : ''
-    }
-
-    // 固定インデックス
-    const model_name = get(1)
-    let capacity = get(2)
-    const color = get(3)
-    let model_number = get(20)
-    let imei = get(21)
-    let serial = get(22)
-    let batteryLine = get(34)
-
-    // 正規化処理
-    capacity = capacity.replace(/\s+/g, '').toUpperCase().replace(/ＴＢ/g, 'TB').replace(/ＧＢ/g, 'GB')
-
-    model_number = model_number
-      .replace(/[Ａ-Ｚａ-ｚ０-９／]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
-      .replace(/\s{2,}/g, ' ')
-      .trim()
-
-    imei = (imei.replace(/\D+/g, '').match(/\d{15}/)?.[0] ?? '')
-    imei = normalizeIMEI(imei) || imei
-
-    serial = normalizeSerial(serial) || serial
-
-    const batteryMatch = batteryLine.match(/(\d{2,3})\s*%/)
-    const battery = batteryMatch ? `${batteryMatch[1]}%` : ''
-
-    return { model_name, capacity, color, model_number, imei, serial, battery }
-  }
-
-
-  async function readFromClipboardAndApply() {
-    try {
-      const text = await navigator.clipboard.readText()
-      if (!text.trim()) return alert('Snipping Toolで「すべてのテキストをコピー」した状態で押してください')
-      const p = parseByFixedOrder(text)
-      setDevice(d => ({ ...d, ...p }))
-      setMessage('クリップボードから機種情報を反映しました')
-    } catch (e: any) {
-      alert('クリップボードの読み取りに失敗しました: ' + (e?.message ?? 'unknown'))
-    }
-  }
-
-  // ========= 価格・検索系 =========
-  function getModelPrefix(): string {
-    const raw = (device.model_number || '').trim()
-    return raw.split(/\s+/)[0] || ''
-  }
-
-  async function openAmemobaForSelectedCarrier() {
-    const key = getModelPrefix()
-    if (!key) return alert('モデル番号を入力してください')
-    window.open(`https://amemoba.com/search/?search-word=${encodeURIComponent(key)}`, '_blank', 'noopener,noreferrer')
-  }
-
-  async function fetchGeo() {
-    const key = getModelPrefix()
-    setGeoError(null); setGeoResult(null); setGeoLoading(true)
-    try {
-      const res = await fetch('/api/geo-prices', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: key }),
-      })
-      const text = await res.text()
-      let json: any = null
-      try { json = JSON.parse(text) } catch {
-        setGeoError(`応答がJSONではありません: HTTP ${res.status} ${res.statusText} / ${text.slice(0, 140)}…`)
-        setGeoLoading(false); return
-      }
-      setGeoSearchUrl(json?.searchUrl ?? null)
-      if (!res.ok || json?.ok === false) {
-        setGeoError(json?.error || `HTTP ${res.status} ${res.statusText}`)
-        setGeoLoading(false); return
-      }
-      const results: GeoRow[] = json.results || []
-      const target = (() => {
-        const c = device.carrier
-        if (c.startsWith('au')) return 'au'
-        if (/softbank/i.test(c)) return 'softbank'
-        if (/docomo/i.test(c)) return 'docomo'
-        if (/SIMフリー/.test(c) || /SIM/.test(c)) return 'simfree'
-        return ''
-      })()
-      const hit =
-        results.find(r => r.carrier === target) ||
-        results.find(r => (r.title || '').toLowerCase().includes(target)) ||
-        results[0] || null
-      setGeoResult(hit)
-    } catch (e: any) {
-      setGeoError(e?.message ?? 'unknown')
-    } finally { setGeoLoading(false) }
-  }
-
-  async function copyAndOpen(text: string, url: string) {
-    try { if (text) await navigator.clipboard.writeText(text) } catch {}
-    window.open(url, '_blank', 'noopener,noreferrer')
-  }
-
-  const modelPrefix = useMemo(() => getModelPrefix(), [device.model_number])
-
-  // ========= JSX =========
   return (
     <div style={{ display: 'grid', gap: 16, padding: 16, maxWidth: 980, margin: '0 auto', background: '#f6f7fb' }}>
       <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, textAlign: 'center' }}>アメモバ買取 富山店　査定受付票</h2>
 
-      {/* 受付 */}
+      {/* 3uTools スクショ貼付枠 */}
       <div style={section}>
-        <div style={row4}>
-          <div style={label}>担当者</div>
-          <select style={box as any} value={staff} onChange={(e) => setStaff(e.target.value)}>
-            {STAFFS.map(s => (<option key={s} value={s}>{s}</option>))}
-          </select>
-          <div style={label}>受付日</div>
-          <input style={box as any} type="date" value={acceptedAt} onChange={(e) => setAcceptedAt(e.target.value)} />
+        <div style={row2}>
+          <div style={label}>3uTools画像</div>
+          <div
+            onPaste={handlePaste}
+            style={{
+              border: '2px dashed #cbd5e1', borderRadius: 10, minHeight: 180, display: 'grid', placeItems: 'center',
+              color: '#6b7280', background: '#fafafa', textAlign: 'center', padding: 8
+            }}
+            title="ここに Ctrl+V でスクショを貼り付け（ファイル選択も可）"
+          >
+            {imgBase64
+              ? <img src={imgBase64} alt="pasted" style={{ maxWidth: '100%', maxHeight: 260, borderRadius: 8 }} />
+              : <div>ここをクリック → <b>Ctrl + V</b> でスクショ貼付<br /><input type="file" accept="image/*" onChange={handleFileChange} /></div>}
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
+          <button
+            onClick={runOCR}
+            disabled={!imgBase64 || ocrLoading}
+            style={{ padding: '6px 12px', borderRadius: 8, border: '1px solid #ddd', opacity: (!imgBase64 || ocrLoading) ? 0.6 : 1 }}
+          >
+            {ocrLoading ? '機種情報取得中…' : '機種情報取得・反映'}
+          </button>
+          <button
+            onClick={runCrop}
+            disabled={!imgBase64}
+            style={{ padding: '6px 12px', borderRadius: 8, border: '1px solid #ddd', opacity: (!imgBase64) ? 0.6 : 1 }}
+          >
+            画像からIMEI/シリアルを切り抜き
+          </button>
+          <div style={{ color: '#2563eb', fontSize: 13 }}>{message}</div>
         </div>
       </div>
 
-      {/* お客様情報 */}
-      <div style={section}>
-        <div style={row4}>
-          <div style={label}>お客様選択</div>
-          <select style={box as any} value={customerSelect} onChange={(e) => setCustomerSelect(e.target.value)}>
-            <option>（最新が先頭）</option>
-          </select>
-          <div style={{ ...label }}>（ヒント）</div>
-          <div style={{ fontSize: 12, color: '#6b7280' }}>フォーム連携は今後追加。手入力でもOKです。</div>
-        </div>
-        <div style={{ height: 8 }} />
-        <div style={row2}><div style={label}>お名前</div><input style={box as any} value={customer.name} onChange={(e)=>setCustomer({...customer,name:e.target.value})}/></div>
-        <div style={row2}><div style={label}>フリガナ</div><input style={box as any} value={customer.kana} onChange={(e)=>setCustomer({...customer,kana:e.target.value})}/></div>
-        <div style={row2}><div style={label}>ご住所</div><input style={box as any} value={customer.address} onChange={(e)=>setCustomer({...customer,address:e.target.value})}/></div>
-        <div style={row4}>
-          <div style={label}>電話番号</div><input style={box as any} value={customer.phone} onChange={(e)=>setCustomer({...customer,phone:e.target.value})}/>
-          <div style={label}>生年月日</div><input style={box as any} type="date" value={customer.birth} onChange={(e)=>setCustomer({...customer,birth:e.target.value})}/>
-        </div>
-      </div>
-
-      {/* 端末情報（クリップボード読み取りボタンを設置） */}
+      {/* 端末情報 + ②プレビュー */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>機種名</div><input style={box as any} value={device.model_name} onChange={(e)=>setDevice({...device,model_name:e.target.value})}/>
           <div style={label}>容量</div><input style={box as any} value={device.capacity} onChange={(e)=>setDevice({...device,capacity:e.target.value})}/>
         </div>
+
         <div style={{ height: 8 }} />
         <div style={row4}>
           <div style={label}>カラー</div><input style={box as any} value={device.color} onChange={(e)=>setDevice({...device,color:e.target.value})}/>
           <div style={label}>モデル番号</div>
-          <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:8, alignItems:'center' }}>
             <input style={box as any} value={device.model_number} onChange={(e)=>setDevice({...device,model_number:e.target.value})}/>
-            <button
-              onClick={readFromClipboardAndApply}
-              style={{ padding:'6px 10px', borderRadius:8, border:'1px solid #ddd', whiteSpace:'nowrap' }}
-              title="Snipping Tool → すべてのテキストをコピー を実行してから押す"
-            >
-              3uToolsから機種情報読み取り
-            </button>
+            {cropModel && <img src={cropModel} alt="model-crop" style={{ maxHeight: 40, border:'1px solid #e5e7eb', borderRadius:6 }} />}
           </div>
         </div>
 
+        <div style={{ height: 8 }} />
         <div style={row4}>
           <div style={label}>IMEI</div>
-          <input style={box as any} value={device.imei} onChange={(e)=>setDevice({...device,imei:e.target.value})}/>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:8, alignItems:'center' }}>
+            <input style={box as any} value={device.imei} onChange={(e)=>setDevice({...device,imei:e.target.value})}/>
+            {cropImei && <img src={cropImei} alt="imei-crop" style={{ maxHeight: 40, border:'1px solid #e5e7eb', borderRadius:6 }} />}
+          </div>
           <div style={label}>シリアル</div>
-          <input style={box as any} value={device.serial} onChange={(e)=>setDevice({...device,serial:e.target.value})}/>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:8, alignItems:'center' }}>
+            <input style={box as any} value={device.serial} onChange={(e)=>setDevice({...device,serial:e.target.value})}/>
+            {cropSerial && <img src={cropSerial} alt="serial-crop" style={{ maxHeight: 40, border:'1px solid #e5e7eb', borderRadius:6 }} />}
+          </div>
         </div>
 
+        <div style={{ height: 8 }} />
         <div style={row4}>
           <div style={label}>バッテリー</div>
           <input style={box as any} placeholder="例）100%" value={device.battery} onChange={(e)=>setDevice({...device,battery:e.target.value})}/>
-          <div style={label}>キャリア</div>
-          <select style={box as any} value={device.carrier} onChange={(e)=>setDevice({...device,carrier:e.target.value})}>
-            <option value=""/>{CARRIERS.map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
-        </div>
-
-        <div style={row4}>
-          <div style={label}>利用制限</div>
-          <select style={box as any} value={device.restrict} onChange={(e)=>setDevice({...device,restrict:e.target.value})}>
-            <option value=""/>{RESTRICTS.map(r => <option key={r} value={r}>{r}</option>)}
-          </select>
           <div/><div/>
         </div>
-
-        {message && <div style={{ marginTop:8, color:'#2563eb', fontSize:13 }}>{message}</div>}
       </div>
 
-      {/* 価格・検索・競合価格（ゲオ） */}
+      {/* 価格（参考） */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>MAX買取価格</div><input style={box as any} placeholder="例）51000" value={maxPrice} onChange={(e)=>setMaxPrice(e.target.value as any)}/>
@@ -262,82 +296,6 @@ export default function AssessForm(): JSX.Element {
         </div>
         <div style={{ height: 8 }} />
         <div style={row2}><div style={label}>本日査定金額</div><input style={box as any} value={todayPrice} readOnly/></div>
-
-        <div style={{ height: 10 }} />
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
-          <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-            <button onClick={openAmemobaForSelectedCarrier}
-                    style={{ padding:'8px 12px', borderRadius:8, border:'1px solid #ddd' }}>
-              amemoba価格検索（{modelPrefix || 'キーワード未入力'}）
-            </button>
-            <div style={{ color:'#6b7280', fontSize:12 }}>例：MWC62 J/A → 検索は MWC62</div>
-          </div>
-
-          <div style={{ border:'1px dashed #d1d5db', borderRadius:10, padding:8 }}>
-            <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
-              <div style={{ fontWeight:700 }}>競合価格（ゲオ）</div>
-              <button onClick={fetchGeo} disabled={!modelPrefix} style={{ padding:'4px 8px', borderRadius:6, border:'1px solid #ddd' }}>
-                {geoLoading ? '更新中…' : '更新'}
-              </button>
-              {geoSearchUrl && <a href={geoSearchUrl} target="_blank" rel="noreferrer" style={{ color:'#2563eb', fontSize:12 }}>検索ページ</a>}
-            </div>
-
-            {geoError && <div style={{ color:'#b91c1c', fontSize:12 }}>取得失敗：{geoError}</div>}
-
-            {!geoError && geoResult && (
-              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:6, fontSize:14 }}>
-                <div><span style={{ color:'#6b7280' }}>キャリア：</span>{geoResult.carrier || '不明'}</div>
-                <div><span style={{ color:'#6b7280' }}>未使用：</span>
-                  {geoResult.unusedText ? `¥${geoResult.unusedText}` : (geoResult.unused ? `¥${geoResult.unused.toLocaleString()}` : '-')}
-                </div>
-                <div><span style={{ color:'#6b7280' }}>中古：</span>
-                  {geoResult.usedText ? `¥${geoResult.usedText}` : (geoResult.used ? `¥${geoResult.used.toLocaleString()}` : '-')}
-                </div>
-                <div style={{ gridColumn:'1 / -1', fontSize:12 }}>
-                  <span style={{ color:'#6b7280' }}>商品：</span>
-                  {geoResult.url
-                    ? <a href={geoResult.url} target="_blank" rel="noreferrer" style={{ color:'#2563eb' }}>{geoResult.title}</a>
-                    : geoResult.title}
-                </div>
-              </div>
-            )}
-            {!geoError && !geoResult && !geoLoading && <div style={{ color:'#6b7280', fontSize:12 }}>未取得（「更新」を押してください）</div>}
-          </div>
-        </div>
-      </div>
-
-      {/* 付属品/ロック/状態 */}
-      <div style={section}>
-        <div style={row4}>
-          <div style={label}>箱・付属品</div>
-          <select style={box as any} value={acc} onChange={(e)=>setAcc(e.target.value)}>
-            {ACCESSORIES.map(a => <option key={a} value={a}>{a}</option>)}
-          </select>
-          <div style={label}>SIMロック</div>
-          <select style={box as any} value={simLock} onChange={(e)=>setSimLock(e.target.value)}>
-            {LOCK_YN.map(a => <option key={a} value={a}>{a}</option>)}
-          </select>
-        </div>
-
-        <div style={{ height: 8 }} />
-        <div style={row4}>
-          <div style={label}>アクティベーションロック</div>
-          <select style={box as any} value={actLock} onChange={(e)=>setActLock(e.target.value)}>
-            {LOCK_YN.map(a => <option key={a} value={a}>{a}</option>)}
-          </select>
-          <div style={label}>状態</div>
-          <select style={box as any} value={condition} onChange={(e)=>setCondition(e.target.value)}>
-            {CONDITIONS.map(c => <option key={c.code} value={c.code}>{c.label}</option>)}
-          </select>
-        </div>
-
-        <div style={{ height: 8 }} />
-        <div style={row2}>
-          <div style={label}>特記事項</div>
-          <textarea style={{ ...box, height: 88, resize: 'vertical' } as any}
-                    placeholder="例）液晶傷あり、Face ID不良 など"
-                    value={conditionNote} onChange={(e)=>setConditionNote(e.target.value)} />
-        </div>
       </div>
     </div>
   )
