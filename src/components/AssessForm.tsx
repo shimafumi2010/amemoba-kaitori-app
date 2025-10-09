@@ -62,48 +62,42 @@ export default function AssessForm(): JSX.Element {
   }, [maxPrice, discount])
 
   // ========= クリップボード（Snipping Tool: すべてのテキストをコピー） =========
-  // 指定の「順番」に厳密に合わせて抽出する版
-  // インデックスは 1 始まりで指定 → 実装では 0 始まりに変換
+  // インデックスは1始まりで指定 → 実装では0始まりに変換
   function parseByFixedOrder(text: string) {
     const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean)
-
-    const get = (oneBasedIndex: number) => {
-      const i = oneBasedIndex - 1
+    const get = (oneBased: number) => {
+      const i = oneBased - 1
       return i >= 0 && i < lines.length ? lines[i] : ''
     }
 
-    // 割り当て（ユーザー指定の順番）
-    const model_name  = get(1) || ''
-    let capacity      = get(2) || ''
-    const color       = get(3) || ''
-    let model_number  = get(20) || ''
-    let imei          = get(21) || ''
-    let serial        = get(22) || ''
-    let batteryLine   = get(34) || '' // 例: "100% Details"
+    // 固定インデックス
+    const model_name = get(1)
+    let capacity = get(2)
+    const color = get(3)
+    let model_number = get(20)
+    let imei = get(21)
+    let serial = get(22)
+    let batteryLine = get(34)
 
-    // 正規化
-    // 容量: "64GB" / "1 TB" → "64GB" / "1TB"
+    // 正規化処理
     capacity = capacity.replace(/\s+/g, '').toUpperCase().replace(/ＴＢ/g, 'TB').replace(/ＧＢ/g, 'GB')
 
-    // モデル番号: 全角→半角, 連続空白→単一空白
     model_number = model_number
-      .replace(/[Ａ-Ｚａ-ｚ０-９／]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
+      .replace(/[Ａ-Ｚａ-ｚ０-９／]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
       .replace(/\s{2,}/g, ' ')
       .trim()
 
-    // IMEI: 15桁
     imei = (imei.replace(/\D+/g, '').match(/\d{15}/)?.[0] ?? '')
     imei = normalizeIMEI(imei) || imei
 
-    // Serial: 12桁英数
     serial = normalizeSerial(serial) || serial
 
-    // Battery: "100% Details" -> "100%"
-    const mBat = batteryLine.match(/(\d{2,3})\s*%/)
-    const battery = mBat ? `${mBat[1]}%` : ''
+    const batteryMatch = batteryLine.match(/(\d{2,3})\s*%/)
+    const battery = batteryMatch ? `${batteryMatch[1]}%` : ''
 
     return { model_name, capacity, color, model_number, imei, serial, battery }
   }
+
 
   async function readFromClipboardAndApply() {
     try {
