@@ -1,11 +1,11 @@
 // src/lib/ocrPostprocess.ts
 
-/** 数字以外を落とす */
+/** 数字のみ抽出 */
 function digitsOnly(s: string) {
   return (s || '').replace(/\D+/g, '')
 }
 
-/** IMEI: Luhn チェック */
+/** IMEI: Luhn 15桁チェック */
 function luhn15(imei: string) {
   if (!/^\d{15}$/.test(imei)) return false
   let sum = 0
@@ -21,7 +21,7 @@ function luhn15(imei: string) {
   return cd === Number(imei[14])
 }
 
-/** OCRのありがちな取り違えを補正 → 15桁化 → Luhn */
+/** OCR/テキスト誤認を補正 → 15桁化 → Luhn */
 export function normalizeIMEI(raw?: string | null): string | '' {
   if (!raw) return ''
   const fixed = raw
@@ -32,7 +32,6 @@ export function normalizeIMEI(raw?: string | null): string | '' {
     .replace(/B/g, '8')
   const d = digitsOnly(fixed)
   if (d.length === 15 && luhn15(d)) return d
-  // 15桁はあるが Luhn 失敗なら、それでも返す（人手修正前提）
   if (d.length === 15) return d
   return ''
 }
