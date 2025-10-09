@@ -159,9 +159,7 @@ export default function AssessForm(): JSX.Element {
 
     try {
       for (let i = 0; i < delays.length; i++) {
-        if (delays[i]) {
-          await new Promise((r) => setTimeout(r, delays[i]))
-        }
+        if (delays[i]) await new Promise((r) => setTimeout(r, delays[i]))
 
         const res = await fetch('/api/ocr', {
           method: 'POST',
@@ -171,9 +169,7 @@ export default function AssessForm(): JSX.Element {
 
         const text = await res.text()
         let json: any = null
-        try {
-          json = JSON.parse(text)
-        } catch {
+        try { json = JSON.parse(text) } catch {
           setMessage(`OCR失敗：応答がJSONではありません / ${text.slice(0, 140)}…`)
           return
         }
@@ -182,7 +178,6 @@ export default function AssessForm(): JSX.Element {
           const secs = Number(json?.retryAfterSeconds ?? 30)
           setMessage(`OCR待機中… レート制限（約 ${secs} 秒後に再試行）`)
           await new Promise((r) => setTimeout(r, Math.max(1, secs) * 1000))
-          // 次のループで再試行
           continue
         }
 
@@ -218,7 +213,6 @@ export default function AssessForm(): JSX.Element {
         return
       }
 
-      // ここまで来たら、全リトライ枠を使い切った
       setMessage('OCR失敗：レート制限により再試行回数を超えました。しばらくしてから実行してください。')
     } catch (e: any) {
       setMessage(`OCR失敗：${e?.message ?? 'unknown error'}`)
@@ -398,7 +392,7 @@ export default function AssessForm(): JSX.Element {
             {cropLoading ? '切り抜き中…' : '画像からIMEI/シリアルを切り抜き'}
           </button>
 
-          <div style={{ color: '#2563eb', fontSize: 13 }}>{message}</div>
+        <div style={{ color: '#2563eb', fontSize: 13 }}>{message}</div>
         </div>
       </div>
 
