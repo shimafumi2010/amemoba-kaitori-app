@@ -1,4 +1,3 @@
-// src/components/AssessForm.tsx
 'use client'
 import React, { useEffect, useMemo, useState } from 'react'
 import { normalizeIMEI, normalizeSerial } from '../lib/ocrPostprocess'
@@ -125,29 +124,33 @@ export default function AssessForm(): JSX.Element {
     return out
   }
 
-  // 2) 「順番」に基づくフォールバック
+  // 2) 「順番」に基づくフォールバック（近い画像なら順序は安定前提）
   function parseByOrder(text: string) {
-    // 例で与えられた順序を想定：上部に 機種名 → 容量 → カラー → Fully Charged → 100 → … → Sales Model → 値 → … → IMEI → 値 → Serial Number → 値 → Battery Life → 値 …
+    // 例：機種名 → 容量 → カラー → Fully Charged → 100 → … → Sales Model → 値 → … → IMEI → 値 → Serial Number → 値 → Battery Life → 値 …
     const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean)
     const out = { model_name: '', capacity: '', color: '', model_number: '', imei: '', serial: '', battery: '' }
     if (!lines.length) return out
 
-    // 上部3値を推定（容量の GB/TB を鍵に）
+    // 上部3値（容量の GB/TB を鍵に）
     const capRe = /\b(\d+(?:\.\d+)?)\s*(GB|TB)\b/i
     const capIdx = lines.findIndex(s => capRe.test(s))
     if (capIdx >= 0) {
       const m = lines[capIdx].match(capRe)!
       out.capacity = `${m[1]}${m[2].toUpperCase()}`
-      // 容量の直前・直後を取りに行く
+      // 容量の直前を機種名、直後をカラーで推定（充電/数値はスキップ）
       for (let i = capIdx - 1; i >= 0; i--) {
         if (lines[i] && !/^\d+%?$|^fully\s+charged$/i.test(lines[i])) { out.model_name = lines[i]; break }
       }
       for (let i = capIdx + 1; i < Math.min(lines.length, capIdx + 6); i++) {
         if (lines[i] && !/^\d+%?$|^fully\s+charged$/i.test(lines[i])) { out.color = lines[i]; break }
       }
+    } else {
+      out.model_name = lines[0] || ''
+      out.capacity  = lines[1] || ''
+      out.color     = lines[2] || ''
     }
 
-    // ラベル名と値が交互に来る前提で拾う
+    // ラベル→値（隣の行）想定
     const takeAfterLabel = (label: string) => {
       const i = lines.findIndex(s => s.toLowerCase() === label)
       return i >= 0 && i + 1 < lines.length ? lines[i + 1] : ''
@@ -179,16 +182,16 @@ export default function AssessForm(): JSX.Element {
       }
       // まずはラベル解析 → ダメなら順序解析
       const byLabels = parseByLabels(text)
-      const merged = (v: string) => v && v.trim().length > 0
+      const mergedOk = (v: string) => v && v.trim().length > 0
       const byOrder = parseByOrder(text)
       const result = {
-        model_name: merged(byLabels.model_name) ? byLabels.model_name : byOrder.model_name,
-        capacity: merged(byLabels.capacity) ? byLabels.capacity : byOrder.capacity,
-        color: merged(byLabels.color) ? byLabels.color : byOrder.color,
-        model_number: merged(byLabels.model_number) ? byLabels.model_number : byOrder.model_number,
-        imei: merged(byLabels.imei) ? byLabels.imei : byOrder.imei,
-        serial: merged(byLabels.serial) ? byLabels.serial : byOrder.serial,
-        battery: merged(byLabels.battery) ? byLabels.battery : byOrder.battery,
+        model_name:  mergedOk(byLabels.model_name)  ? byLabels.model_name  : byOrder.model_name,
+        capacity:    mergedOk(byLabels.capacity)    ? byLabels.capacity    : byOrder.capacity,
+        color:       mergedOk(byLabels.color)       ? byLabels.color       : byOrder.color,
+        model_number:mergedOk(byLabels.model_number)? byLabels.model_number: byOrder.model_number,
+        imei:        mergedOk(byLabels.imei)        ? byLabels.imei        : byOrder.imei,
+        serial:      mergedOk(byLabels.serial)      ? byLabels.serial      : byOrder.serial,
+        battery:     mergedOk(byLabels.battery)     ? byLabels.battery     : byOrder.battery,
       }
 
       setDevice(d => ({
