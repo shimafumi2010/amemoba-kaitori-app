@@ -148,111 +148,78 @@ export default function AssessForm(): JSX.Element {
     }
   }
 
-  // AssessForm.tsx 内の runOCRInfo を以下で置き換え
-async function runOCRInfo() {
-  if (!imgBase64 || ocrLoading) return
-  setOcrLoading(true)
-  setMessage('機種情報取得中…')
+  /** 機種情報取得・反映（OCR：テキストのみ）— 429バックオフ＋新APIマッピング */
+  async function runOCRInfo() {
+    if (!imgBase64 || ocrLoading) return
+    setOcrLoading(true)
+    setMessage('機種情報取得中…')
 
-  // バックオフ 0ms, 800ms, 1600ms, 3200ms（サーバが retryAfterSeconds を返したらそれを優先）
-  const delays = [0, 800, 1600, 3200]
+    // バックオフ 0ms → 800ms → 1600ms → 3200ms
+    const delays = [0, 800, 1600, 3200]
 
-  try {
-    for (let i = 0; i < delays.length; i++) {
-      if (delays[i]) await new Promise(r => setTimeout(r, delays[i]))
+    try {
+      for (let i = 0; i < delays.length; i++) {
+        if (delays[i]) {
+          await new Promise((r) => setTimeout(r, delays[i]))
+        }
 
-      const res = await fetch('/api/ocr', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: imgBase64, mode: 'extractInfo' }),
-      })
+        const res = await fetch('/api/ocr', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ imageBase64: imgBase64, mode: 'extractInfo' }),
+        })
 
-      const text = await res.text()
-      let json: any = null
-      try { json = JSON.parse(text) } catch {
-        setMessage(`OCR失敗：応答がJSONではありません / ${text.slice(0, 140)}…`)
+        const text = await res.text()
+        let json: any = null
+        try {
+          json = JSON.parse(text)
+        } catch {
+          setMessage(`OCR失敗：応答がJSONではありません / ${text.slice(0, 140)}…`)
+          return
+        }
+
+        if (res.status === 429 || json?.error === 'RATE_LIMIT') {
+          const secs = Number(json?.retryAfterSeconds ?? 30)
+          setMessage(`OCR待機中… レート制限（約 ${secs} 秒後に再試行）`)
+          await new Promise((r) => setTimeout(r, Math.max(1, secs) * 1000))
+          // 次のループで再試行
+          continue
+        }
+
+        if (!res.ok || json?.ok === false) {
+          setMessage(`OCR失敗：${json?.error || `HTTP ${res.status} ${res.statusText}`}`)
+          return
+        }
+
+        // ===== 成功：新API → 既存UI項目へマッピング =====
+        const fields = json.fields ?? {}
+        const bboxes = json.bboxes ?? {}
+
+        setImeiBBox(bboxes?.imei?.[0] ?? bboxes?.IMEI?.[0] ?? null)
+        setSerialBBox(bboxes?.serial?.[0] ?? bboxes?.Serial?.[0] ?? null)
+
+        const imeiNorm = normalizeIMEI((fields.imeiCandidates?.[0] ?? '') as string) || ''
+        const serialNorm = normalizeSerial((fields.serialCandidates?.[0] ?? '') as string) || ''
+        const modelFront = (fields.modelCandidates?.[0] ?? '').toString()
+        const batteryPct =
+          typeof fields.batteryPercent === 'number' && Number.isFinite(fields.batteryPercent)
+            ? `${Math.round(Math.max(0, Math.min(100, fields.batteryPercent)))}%`
+            : ''
+
+        setDevice((d) => ({
+          ...d,
+          model_number: modelFront || d.model_number,
+          imei: imeiNorm || d.imei,
+          serial: serialNorm || d.serial,
+          battery: batteryPct || d.battery,
+        }))
+
+        setMessage('OCR完了：必要項目を反映しました（切り抜きは別ボタンで実行）')
         return
       }
 
-      // 429 → サーバからの指示に従って待機 → もう一度だけ即リトライ（次のループへ）
-      if (res.status === 429 || json?.error === 'RATE_LIMIT') {
-        const secs = Number(json?.retryAfterSeconds ?? 30)
-        setMessage(`OCR待機中… レート制限（約 ${secs} 秒後に再試行）`)
-        await new Promise(r => setTimeout(r, Math.max(1, secs) * 1000))
-        // ここで次のループ継続（i を進める）。最後までいったら下で失敗表示。
-        continue
-      }
-
-      if (!res.ok || json?.ok === false) {
-        // 他のエラーは即時エラーメッセージ
-        setMessage(`OCR失敗：${json?.error || `HTTP ${res.status} ${res.statusText}`}`)
-        return
-      }
-
-      // ===== 成功：新API → 既存UI項目へマッピング =====
-      const fields = json.fields ?? {}
-      const bboxes = json.bboxes ?? {}
-
-      setImeiBBox(bboxes?.imei?.[0] ?? bboxes?.IMEI?.[0] ?? null)
-      setSerialBBox(bboxes?.serial?.[0] ?? bboxes?.Serial?.[0] ?? null)
-
-      const imeiNorm = normalizeIMEI((fields.imeiCandidates?.[0] ?? '') as string) || ''
-      const serialNorm = normalizeSerial((fields.serialCandidates?.[0] ?? '') as string) || ''
-      const modelFront = (fields.modelCandidates?.[0] ?? '').toString()
-      const batteryPct = typeof fields.batteryPercent === 'number' && Number.isFinite(fields.batteryPercent)
-        ? `${Math.round(Math.max(0, Math.min(100, fields.batteryPercent)))}%`
-        : ''
-
-      setDevice(d => ({
-        ...d,
-        model_number: modelFront || d.model_number,
-        imei: imeiNorm || d.imei,
-        serial: serialNorm || d.serial,
-        battery: batteryPct || d.battery,
-      }))
-
-      setMessage('OCR完了：必要項目を反映しました（切り抜きは別ボタンで実行）')
-      return
-    }
-
-    // ここまで来たら、全リトライ枠を使い切った
-    setMessage('OCR失敗：レート制限により再試行回数を超えました。しばらくしてから実行してください。')
-  } catch (e: any) {
-    setMessage(`OCR失敗：${e?.message ?? 'unknown error'}`)
-  } finally {
-    setOcrLoading(false)
-  }
-}
-
-
-      // ===== 新APIフォーマットを旧UI項目へマッピング =====
-      const fields = json?.fields ?? {}
-      const bboxes = json?.bboxes ?? {}
-      // bbox は保持だけ（切り抜きは別ボタンで）
-      const imeiBox = (bboxes?.imei?.[0] ?? bboxes?.IMEI?.[0] ?? null)
-      const serialBox = (bboxes?.serial?.[0] ?? bboxes?.Serial?.[0] ?? null)
-      setImeiBBox(imeiBox)
-      setSerialBBox(serialBox)
-
-      const imeiNorm = normalizeIMEI((fields.imeiCandidates?.[0] ?? '') as string) || ''
-      const serialNorm = normalizeSerial((fields.serialCandidates?.[0] ?? '') as string) || ''
-      const modelFront = (fields.modelCandidates?.[0] ?? '').toString()
-      const batteryPct = typeof fields.batteryPercent === 'number' && Number.isFinite(fields.batteryPercent)
-        ? `${Math.round(Math.max(0, Math.min(100, fields.batteryPercent)))}%`
-        : ''
-
-      setDevice(d => ({
-        ...d,
-        model_name: d.model_name,                 // OCRは任意（必要なら上書き可）
-        capacity: d.capacity,
-        color: d.color,
-        model_number: modelFront || d.model_number,
-        imei: imeiNorm || d.imei,
-        serial: serialNorm || d.serial,
-        battery: batteryPct || d.battery,
-      }))
-
-      setMessage('OCR完了：必要項目を反映しました（切り抜きは別ボタンで実行）')
+      // ここまで来たら、全リトライ枠を使い切った
+      setMessage('OCR失敗：レート制限により再試行回数を超えました。しばらくしてから実行してください。')
     } catch (e: any) {
       setMessage(`OCR失敗：${e?.message ?? 'unknown error'}`)
     } finally {
@@ -262,8 +229,8 @@ async function runOCRInfo() {
 
   /** 画像からIMEI/シリアルを切り抜き（bbox → crop） */
   async function runCrop() {
-    if (!imgBase64) return setMessage('先に画像を貼り付けてください')
-    if (!imeiBBox && !serialBBox) return setMessage('先に「機種情報取得・反映」を実行してbboxを取得してください')
+    if (!imgBase64) { setMessage('先に画像を貼り付けてください'); return }
+    if (!imeiBBox && !serialBBox) { setMessage('先に「機種情報取得・反映」を実行してbboxを取得してください'); return }
     setCropLoading(true)
     setMessage('切り抜き実行中…')
     try {
@@ -292,8 +259,8 @@ async function runOCRInfo() {
   /** amemoba 検索 — 新APIに合わせて送信＆オープン */
   async function openAmemobaForSelectedCarrier() {
     const key = getModelPrefix()
-    if (!key) return alert('モデル番号 または 機種名を入力してください')
-    if (!device.carrier) return alert('キャリアを選択してください')
+    if (!key) { alert('モデル番号 または 機種名を入力してください'); return }
+    if (!device.carrier) { alert('キャリアを選択してください'); return }
 
     setMessage(`amemoba検索中…（${key} / ${device.carrier}）`)
     try {
@@ -305,7 +272,8 @@ async function runOCRInfo() {
       if (!res.ok || json?.ok === false) {
         setMessage(`検索失敗: ${json?.error || `${res.status} ${res.statusText}`}`)
         const fallback = `https://amemoba.com/search/?search-word=${encodeURIComponent(key)}`
-        window.open(fallback, '_blank', 'noopener,noreferrer'); return
+        window.open(fallback, '_blank', 'noopener,noreferrer')
+        return
       }
       const url = json.firstLink || json.searchUrl || `https://amemoba.com/search/?search-word=${encodeURIComponent(key)}`
       window.open(url, '_blank', 'noopener,noreferrer')
@@ -330,12 +298,14 @@ async function runOCRInfo() {
       let json: any = null
       try { json = JSON.parse(text) } catch {
         setGeoError(`応答がJSONではありません: HTTP ${res.status} ${res.statusText} / ${text.slice(0, 140)}…`)
-        setGeoLoading(false); return
+        setGeoLoading(false)
+        return
       }
       setGeoSearchUrl(json?.geoUrl ?? null)
       if (!res.ok || json?.ok === false) {
         setGeoError(json?.error || `HTTP ${res.status} ${res.statusText}`)
-        setGeoLoading(false); return
+        setGeoLoading(false)
+        return
       }
       const row: GeoRow = {
         title: '検索結果',
@@ -347,7 +317,9 @@ async function runOCRInfo() {
       setGeoResult(row)
     } catch (e: any) {
       setGeoError(e?.message ?? 'unknown')
-    } finally { setGeoLoading(false) }
+    } finally {
+      setGeoLoading(false)
+    }
   }
 
   async function copyAndOpen(text: string, url: string) {
