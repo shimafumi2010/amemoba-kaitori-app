@@ -17,13 +17,7 @@ const CONDITIONS = [
 const CARRIERS = ['SoftBank', 'au(KDDI)', 'docomo', '楽天モバイル', 'SIMフリー'] as const
 const RESTRICTS = ['○', '△', '×', '-'] as const
 
-type GeoRow = {
-  title: string
-  url?: string
-  carrier?: string
-  unusedText?: string
-  usedText?: string
-}
+type GeoRow = { title: string; url?: string; carrier?: string; unusedText?: string; usedText?: string }
 
 type BBox = { x: number; y: number; w: number; h: number }
 type MaybeBBox = BBox | null
@@ -33,6 +27,20 @@ const label: React.CSSProperties = { fontWeight: 600, fontSize: 13 }
 const box: React.CSSProperties = { width: '100%', padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 8 }
 const row2 = { display: 'grid', gridTemplateColumns: '160px 1fr', gap: 10, alignItems: 'center' } as const
 const row4 = { display: 'grid', gridTemplateColumns: '160px 1fr 160px 1fr', gap: 10, alignItems: 'center' } as const
+
+// 3uToolsスクショ固定前提のROI（0..1正規化）
+const ROI = {
+  header: {
+    modelName: { x: 0.12, y: 0.04, w: 0.22, h: 0.07 },
+    capacity: { x: 0.35, y: 0.04, w: 0.09, h: 0.07 },
+    color: { x: 0.45, y: 0.04, w: 0.22, h: 0.07 },
+  },
+  table: {
+    salesModel: { x: 0.28, y: 0.42, w: 0.22, h: 0.06 },
+    imei: { x: 0.28, y: 0.49, w: 0.22, h: 0.06 },
+    serial: { x: 0.28, y: 0.56, w: 0.22, h: 0.06 },
+  },
+} as const
 
 async function cropFromBase64ByBbox(imageBase64: string, bbox: BBox): Promise<string | null> {
   return new Promise((resolve) => {
@@ -52,6 +60,20 @@ async function cropFromBase64ByBbox(imageBase64: string, bbox: BBox): Promise<st
     img.onerror = () => resolve(null)
     img.src = imageBase64
   })
+}
+
+async function cropByROI(imageBase64: string) {
+  const [modelName, capacity, color, salesModel, imei, serial] = await Promise.all([
+    cropFromBase64ByBbox(imageBase64, ROI.header.modelName),
+    cropFromBase64ByBbox(imageBase64, ROI.header.capacity),
+    cropFromBase64ByBbox(imageBase64, ROI.header.color),
+    cropFromBase64ByBbox(imageBase64, ROI.table.salesModel),
+    cropFromBase64ByBbox(imageBase64, ROI.table.imei),
+    cropFromBase64ByBbox(imageBase64, ROI.table.serial),
+  ])
+  return {
+    modelName, capacity, color, salesModel, imei, serial,
+  }
 }
 
 async function downscaleBase64(dataUrl: string, maxW = 1400): Promise<string> {
@@ -98,34 +120,27 @@ type SaveItem = {
 }
 
 export default function AssessForm(): JSX.Element {
-  // 受付
   const [staff, setStaff] = useState('島野ひとみ')
   const [acceptedAt, setAcceptedAt] = useState(() => new Date().toISOString().slice(0, 10))
 
-  // お客様情報
   const [customerSelect, setCustomerSelect] = useState('（最新が先頭）')
   const [customer, setCustomer] = useState({ name: '', kana: '', address: '', phone: '', birth: '' })
 
-  // 端末
   const [device, setDevice] = useState({
     model_name: '', capacity: '', color: '', model_number: '',
     imei: '', serial: '', battery: '', carrier: '', restrict: ''
   })
 
-  // 付属品/ロック/状態
   const [acc, setAcc] = useState(''); const [simLock, setSimLock] = useState(''); const [actLock, setActLock] = useState('')
   const [condition, setCondition] = useState('B'); const [conditionNote, setConditionNote] = useState('')
 
-  // 価格
   const [maxPrice, setMaxPrice] = useState<number | ''>(''); const [discount, setDiscount] = useState<number | ''>(''); const [todayPrice, setTodayPrice] = useState<number>(0)
 
-  // 競合（ゲオ）
   const [geoLoading, setGeoLoading] = useState(false)
   const [geoError, setGeoError] = useState<string | null>(null)
   const [geoResult, setGeoResult] = useState<GeoRow | null>(null)
   const [geoSearchUrl, setGeoSearchUrl] = useState<string | null>(null)
 
-  // 画像 / OCR
   const [imgBase64, setImgBase64] = useState<string | null>(null)
   const [message, setMessage] = useState('')
   const [ocrLoading, setOcrLoading] = useState(false)
@@ -135,7 +150,6 @@ export default function AssessForm(): JSX.Element {
   const [imeiBBox, setImeiBBox] = useState<MaybeBBox>(null)
   const [serialBBox, setSerialBBox] = useState<MaybeBBox>(null)
 
-  // 保存/検索
   const [query, setQuery] = useState('')
   const [searchResults, setSearchResults] = useState<SaveItem[]>([])
 
@@ -145,12 +159,8 @@ export default function AssessForm(): JSX.Element {
     setTodayPrice(Math.max(0, max - disc))
   }, [maxPrice, discount])
 
-  // キャリア変更時はゲオ結果をクリア（指摘4の挙動修正）
-  useEffect(() => {
-    setGeoResult(null)
-  }, [device.carrier])
+  useEffect(() => { setGeoResult(null) }, [device.carrier])
 
-  /** 貼り付け（Snipping Tool → Ctrl+V） */
   async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
     const items = e.clipboardData?.items
     if (!items) return
@@ -168,83 +178,56 @@ export default function AssessForm(): JSX.Element {
     }
   }
 
-  /** 機種情報取得・反映（OCR：テキストのみ）— 429バックオフ＋新APIマッピング */
+  // ROIベースで小画像に分割してから一括OCR
   async function runOCRInfo() {
     if (!imgBase64 || ocrLoading) return
     setOcrLoading(true)
     setMessage('機種情報取得中…')
 
-    const delays = [0, 800, 1600, 3200] // 429バックオフ
-
     try {
-      for (let i = 0; i < delays.length; i++) {
-        if (delays[i]) await new Promise((r) => setTimeout(r, delays[i]))
+      const tiles = await cropByROI(imgBase64)
+      const reqTiles = [
+        { key: 'modelName', imageBase64: tiles.modelName! },
+        { key: 'capacity', imageBase64: tiles.capacity! },
+        { key: 'color', imageBase64: tiles.color! },
+        { key: 'salesModelFull', imageBase64: tiles.salesModel! },
+        { key: 'imei', imageBase64: tiles.imei! },
+        { key: 'serial', imageBase64: tiles.serial! },
+      ].filter(t => !!t.imageBase64)
 
-        const res = await fetch('/api/ocr', {
+      const res = await fetch('/api/ocr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'tile', tiles: reqTiles }),
+      })
+
+      // 429なら少し待って1回だけ再試行
+      if (res.status === 429) {
+        const json = await res.json().catch(() => ({}))
+        const wait = Number(json?.retryAfterSeconds ?? 20)
+        setMessage(`OCR待機中… レート制限（約 ${wait} 秒後に再試行）`)
+        await new Promise(r => setTimeout(r, Math.max(1, wait) * 1000))
+        const res2 = await fetch('/api/ocr', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ imageBase64: imgBase64 }),
+          body: JSON.stringify({ mode: 'tile', tiles: reqTiles }),
         })
-
-        const text = await res.text()
-        let json: any = null
-        try { json = JSON.parse(text) } catch {
-          setMessage(`OCR失敗：応答がJSONではありません / ${text.slice(0, 140)}…`)
-          return
+        if (!res2.ok) {
+          const t = await res2.text()
+          setMessage(`OCR失敗：${t.slice(0, 140)}…`); setOcrLoading(false); return
         }
-
-        if (res.status === 429 || json?.error === 'RATE_LIMIT') {
-          const secs = Number(json?.retryAfterSeconds ?? 30)
-          setMessage(`OCR待機中… レート制限（約 ${secs} 秒後に再試行）`)
-          await new Promise((r) => setTimeout(r, Math.max(1, secs) * 1000))
-          continue
-        }
-
-        if (!res.ok || json?.ok === false) {
-          setMessage(`OCR失敗：${json?.error || `HTTP ${res.status} ${res.statusText}`}`)
-          return
-        }
-
-        const fields = json.fields ?? {}
-        const bboxes = json.bboxes ?? {}
-
-        // bbox は配列で返ってくる前提。1件目だけ使う
-        const imeiArr: BBox[] = Array.isArray(bboxes?.imei) ? bboxes.imei : []
-        const serialArr: BBox[] = Array.isArray(bboxes?.serial) ? bboxes.serial : []
-        setImeiBBox(imeiArr[0] ?? null)
-        setSerialBBox(serialArr[0] ?? null)
-
-        const imeiNorm = normalizeIMEI((fields.imeiCandidates?.[0] ?? '') as string) || ''
-        const serialNorm = normalizeSerial((fields.serialCandidates?.[0] ?? '') as string) || ''
-        const modelFront = (fields.modelCandidates?.[0] ?? '').toString()
-        const modelFull = (fields.modelNumberFull ?? '').toString().trim()
-
-        const modelName = (fields.modelName ?? '').toString().trim()
-        const capacity = (fields.capacity ?? '').toString().trim()
-        const color = (fields.color ?? '').toString().trim()
-
-        const batteryPct =
-          typeof fields.batteryPercent === 'number' && Number.isFinite(fields.batteryPercent)
-            ? `${Math.round(Math.max(0, Math.min(100, fields.batteryPercent)))}%`
-            : ''
-
-        setDevice((d) => ({
-          ...d,
-          model_name: modelName || d.model_name,
-          capacity: capacity || d.capacity,
-          color: color || d.color,
-          // モデル番号は「フル」を優先（例：MWC62 J/A）
-          model_number: modelFull || modelFront || d.model_number,
-          imei: imeiNorm || d.imei,
-          serial: serialNorm || d.serial,
-          battery: batteryPct || d.battery,
-        }))
-
-        setMessage('OCR完了：必要項目を反映しました（切り抜きは別ボタンで実行）')
+        const j2 = await res2.json()
+        applyTileResult(j2?.tiles || {})
         return
       }
 
-      setMessage('OCR失敗：レート制限により再試行回数を超えました。しばらくしてから実行してください。')
+      if (!res.ok) {
+        const t = await res.text()
+        setMessage(`OCR失敗：${t.slice(0, 140)}…`); return
+      }
+
+      const json = await res.json()
+      applyTileResult(json?.tiles || {})
     } catch (e: any) {
       setMessage(`OCR失敗：${e?.message ?? 'unknown error'}`)
     } finally {
@@ -252,23 +235,50 @@ export default function AssessForm(): JSX.Element {
     }
   }
 
-  /** 画像からIMEI/シリアルを切り抜き（bbox → crop） */
+  function applyTileResult(tiles: any) {
+    const imeiNorm = normalizeIMEI(String(tiles.imei || '')) || ''
+    const serialNorm = normalizeSerial(String(tiles.serial || '')) || ''
+    const modelFull = String(tiles.salesModelFull || '').trim()
+    const modelName = String(tiles.modelName || '').trim()
+    const capacity = String(tiles.capacity || '').trim()
+    const color = String(tiles.color || '').trim()
+
+    setDevice((d) => ({
+      ...d,
+      model_name: modelName || d.model_name,
+      capacity: capacity || d.capacity,
+      color: color || d.color,
+      model_number: modelFull || d.model_number, // フル（例：MWC62 J/A）
+      imei: imeiNorm || d.imei,
+      serial: serialNorm || d.serial,
+    }))
+
+    // ROI切り抜きのプレビュー（IMEI/Serial）
+    if (imgBase64) {
+      cropFromBase64ByBbox(imgBase64, ROI.table.imei).then((u) => setImeiCrop(u))
+      cropFromBase64ByBbox(imgBase64, ROI.table.serial).then((u) => setSerialCrop(u))
+      setImeiBBox(ROI.table.imei)
+      setSerialBBox(ROI.table.serial)
+    }
+
+    setMessage('OCR完了：必要項目を反映しました（切り抜きは右プレビューに表示）')
+  }
+
   async function runCrop() {
     if (!imgBase64) { setMessage('先に画像を貼り付けてください'); return }
-    // bbox は null ではない && 幅高さが正 ⇒ 実行
-    const hasImei = !!(imeiBBox && imeiBBox.w > 0 && imeiBBox.h > 0)
-    const hasSerial = !!(serialBBox && serialBBox.w > 0 && serialBBox.h > 0)
-    if (!hasImei && !hasSerial) { setMessage('先に「機種情報取得・反映」を実行してbboxを取得してください'); return }
+    const hasImei = !!ROI.table.imei
+    const hasSerial = !!ROI.table.serial
+    if (!hasImei && !hasSerial) { setMessage('ROI未設定'); return }
 
     setCropLoading(true)
     setMessage('切り抜き実行中…')
     try {
-      if (hasImei && imeiBBox) {
-        const url = await cropFromBase64ByBbox(imgBase64, imeiBBox)
+      if (hasImei) {
+        const url = await cropFromBase64ByBbox(imgBase64, ROI.table.imei)
         if (url) setImeiCrop(url)
       }
-      if (hasSerial && serialBBox) {
-        const url = await cropFromBase64ByBbox(imgBase64, serialBBox)
+      if (hasSerial) {
+        const url = await cropFromBase64ByBbox(imgBase64, ROI.table.serial)
         if (url) setSerialCrop(url)
       }
       setMessage('切り抜き完了：右のプレビューで確認できます')
@@ -279,7 +289,6 @@ export default function AssessForm(): JSX.Element {
     }
   }
 
-  // モデル番号の「前半5文字（英数）」だけを抽出（amemoba検索用）
   const modelPrefix = useMemo(() => {
     const raw = (device.model_number || '').toUpperCase()
     const m = raw.match(/[A-Z0-9]{5}/)
@@ -313,7 +322,6 @@ export default function AssessForm(): JSX.Element {
     }
   }
 
-  /** GEO 価格取得（キャリアをAPIへ渡す＆毎回リフレッシュ） */
   async function fetchGeo() {
     const key = modelPrefix
     setGeoError(null); setGeoResult(null); setGeoLoading(true)
@@ -351,7 +359,6 @@ export default function AssessForm(): JSX.Element {
     window.open(url, '_blank', 'noopener,noreferrer')
   }
 
-  /** PDF 出力（簡易：現在のフォームを新窓に描画して印刷） */
   function exportPdf() {
     const node = document.getElementById('assess-root')
     if (!node) return
@@ -375,7 +382,6 @@ export default function AssessForm(): JSX.Element {
     w.print()
   }
 
-  /** 保存（localStorage） */
   function saveCurrent() {
     const payload: SaveItem = {
       id: crypto.randomUUID(),
@@ -392,7 +398,6 @@ export default function AssessForm(): JSX.Element {
     setMessage('保存しました')
   }
 
-  /** 検索（localStorage） */
   function searchSaved(q: string) {
     const key = 'amemoba-assess-saves'
     const list: SaveItem[] = JSON.parse(localStorage.getItem(key) || '[]')
@@ -411,7 +416,6 @@ export default function AssessForm(): JSX.Element {
     <div id="assess-root" style={{ display: 'grid', gap: 16, padding: 16, maxWidth: 980, margin: '0 auto', background: '#f6f7fb' }}>
       <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, textAlign: 'center' }}>アメモバ買取 富山店　査定受付票</h2>
 
-      {/* 受付 */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>担当者</div>
@@ -423,7 +427,6 @@ export default function AssessForm(): JSX.Element {
         </div>
       </div>
 
-      {/* お客様情報 */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>お客様選択</div>
@@ -443,7 +446,6 @@ export default function AssessForm(): JSX.Element {
         </div>
       </div>
 
-      {/* 3uTools：貼付け＆OCR */}
       <div style={section}>
         <div style={row2}>
           <div style={label}>3uTools画像</div>
@@ -473,7 +475,7 @@ export default function AssessForm(): JSX.Element {
             onClick={runCrop}
             disabled={!imgBase64 || cropLoading}
             style={{ padding: '6px 12px', borderRadius: 8, border: '1px solid #ddd', opacity: (!imgBase64 || cropLoading) ? 0.6 : 1 }}
-            title={!imgBase64 ? 'まずスクショを貼り付けてください' : 'bboxに従って切り抜き'}
+            title={!imgBase64 ? 'まずスクショを貼り付けてください' : 'ROIに従って切り抜き'}
           >
             {cropLoading ? '切り抜き中…' : '画像からIMEI/シリアルを切り抜き'}
           </button>
@@ -490,7 +492,6 @@ export default function AssessForm(): JSX.Element {
         </div>
       </div>
 
-      {/* 端末情報 + クロッププレビュー */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>機種名</div><input style={box as any} value={device.model_name} onChange={(e)=>setDevice({...device,model_name:e.target.value})}/>
@@ -546,7 +547,6 @@ export default function AssessForm(): JSX.Element {
         </div>
       </div>
 
-      {/* 価格・検索・競合価格 */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>MAX買取価格</div><input style={box as any} placeholder="例）51000" value={maxPrice} onChange={(e)=>setMaxPrice(e.target.value as any)}/>
@@ -594,7 +594,6 @@ export default function AssessForm(): JSX.Element {
         </div>
       </div>
 
-      {/* 付属品/ロック/状態 */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>箱・付属品</div>
@@ -628,7 +627,6 @@ export default function AssessForm(): JSX.Element {
         </div>
       </div>
 
-      {/* 保存検索 */}
       <div style={section}>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
           <div style={label}>保存データ検索</div>
