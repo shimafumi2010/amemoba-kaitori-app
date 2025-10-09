@@ -2,151 +2,109 @@
 import { NextRequest, NextResponse } from 'next/server'
 import OpenAI from 'openai'
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 export const runtime = 'nodejs'
-export const preferredRegion = ['hnd1', 'icn1', 'sin1', 'sfo1']
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
-function bad(message: string, status = 400, extra: Record<string, any> = {}) {
-  return NextResponse.json({ ok: false, error: message, ...extra }, { status })
+function bad(message: string, status = 400) {
+  return NextResponse.json({ ok: false, error: message }, { status })
 }
 
-// 軽い直列化で429を緩和
-let chain = Promise.resolve()
-function enqueue<T>(fn: () => Promise<T>): Promise<T> {
-  const next = chain.then(fn, fn)
-  chain = next.then(() => undefined, () => undefined)
-  return next
-}
-
+/**
+ * 期待する返却JSON（最小版）:
+ * {
+ *   ok: true,
+ *   data: {
+ *     model_name: string|null,     // 例: "iPhone 11 Pro"
+ *     capacity: string|null,       // 例: "64GB"
+ *     color: string|null,          // 例: "Midnight Green"
+ *     model_number: string|null,   // 例: "MWC62 J/A"（※フルで返す）
+ *     imei: string|null,           // 15桁（フォーマットはそのまま）
+ *     serial: string|null,         // 12桁英数（フォーマットはそのまま）
+ *     battery: string|null         // 例: "100%" など文字列でOK
+ *   },
+ *   imei_bbox?: {x:number,y:number,w:number,h:number}|null,    // 0..1 の正規化座標（任意）
+ *   serial_bbox?: {x:number,y:number,w:number,h:number}|null   // 0..1 の正規化座標（任意）
+ * }
+ */
 export async function POST(req: NextRequest) {
-  return enqueue(async () => {
-    try {
-      const body = await req.json()
+  try {
+    const { imageBase64 } = await req.json()
+    if (!imageBase64 || typeof imageBase64 !== 'string') {
+      return bad('imageBase64 が必要です')
+    }
 
-      // --------- 新：タイル（ROI切り出し済みの小画像）をまとめてOCR ---------
-      if (body?.mode === 'tile') {
-        const tiles: Array<{ key: string; imageBase64: string }> = Array.isArray(body?.tiles) ? body.tiles : []
-        if (tiles.length === 0) return bad('tiles が空です')
+    const prompt = `
+You are an OCR/IE agent for a 3uTools device info screenshot (always same layout).
+Return ONLY JSON with exactly:
 
-        const instruct =
-          `You will be given several small cropped images from the same screen (3uTools).
-Each image is preceded by a line "KEY: <name>".
-Read the value for each key and return ONLY JSON with exactly the following keys:
 {
-  "modelName": string|null,       // e.g. "iPhone 11 Pro"
-  "capacity": string|null,        // e.g. "64GB"
-  "color": string|null,           // e.g. "Midnight Green"
-  "salesModelFull": string|null,  // e.g. "MWC62 J/A"
-  "imei": string|null,            // 15 digits as seen
-  "serial": string|null           // 12 alnum as seen
-}
-Rules:
-- Output only valid JSON, no extra text.
-- Keep strings as they appear (do not translate).
-- If you cannot read a value, use null.`
-
-        const contents: any[] = [{ type: 'text', text: instruct }]
-        for (const t of tiles) {
-          contents.push({ type: 'text', text: `KEY: ${t.key}` })
-          contents.push({ type: 'image_url', image_url: { url: t.imageBase64 } })
-        }
-
-        const res = await client.chat.completions.create({
-          model: 'gpt-4o-mini',
-          temperature: 0.1,
-          messages: [{ role: 'user', content: contents }],
-          response_format: { type: 'json_object' },
-        })
-
-        const raw = res.choices?.[0]?.message?.content ?? '{}'
-        let data: any = {}
-        try {
-          data = JSON.parse(raw)
-        } catch {
-          const jsonLike = raw.match(/\{[\s\S]*\}/)?.[0]
-          data = jsonLike ? JSON.parse(jsonLike) : {}
-        }
-
-        const out = {
-          modelName: typeof data.modelName === 'string' ? data.modelName : null,
-          capacity: typeof data.capacity === 'string' ? data.capacity : null,
-          color: typeof data.color === 'string' ? data.color : null,
-          salesModelFull: typeof data.salesModelFull === 'string' ? data.salesModelFull : null,
-          imei: typeof data.imei === 'string' ? data.imei : null,
-          serial: typeof data.serial === 'string' ? data.serial : null,
-        }
-
-        return NextResponse.json({ ok: true, tiles: out })
-      }
-
-      // --------- 既存：フル画像 OCR（保険） ---------
-      const imageBase64 = body?.imageBase64
-      if (!imageBase64 || typeof imageBase64 !== 'string') return bad('imageBase64 が必要です')
-
-      const prompt = `You are an OCR/IE agent for a 3uTools screenshot.
-Return ONLY JSON:
-{
-  "imeiCandidates": string[],
-  "serialCandidates": string[],
-  "modelCandidates": string[],
-  "modelNumberFull": string|null,
-  "batteryPercent": number|null,
-  "modelName": string|null,
+  "model_name": string|null,
   "capacity": string|null,
   "color": string|null,
-  "bboxes": { "imei": Array<{x:number,y:number,w:number,h:number}>, "serial": Array<{x:number,y:number,w:number,h:number}> }
+  "model_number": string|null,
+  "imei": string|null,
+  "serial": string|null,
+  "battery": string|null,
+  "imei_bbox": {"x":number,"y":number,"w":number,"h":number}|null,
+  "serial_bbox": {"x":number,"y":number,"w":number,"h":number}|null
 }
-- Top header shows: "<ModelName>  <Capacity>  <Color>" — read them.
-- modelNumberFull example: "MWC62 J/A".
-- bboxes must be normalized 0..1 and arrays (empty allowed).
-- Output only JSON.`
 
-      const res = await client.chat.completions.create({
-        model: 'gpt-4o-mini',
-        temperature: 0.2,
-        messages: [
-          { role: 'user', content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: imageBase64 } }] },
-        ],
-        response_format: { type: 'json_object' },
-      })
+Rules:
+- model_name: top-left header (e.g., "iPhone 11 Pro")
+- capacity: next token in header (e.g., "64GB")
+- color: next token in header (e.g., "Midnight Green")
+- model_number: full string including suffix (e.g., "MWC62 J/A")
+- imei: 15-digit as shown (do not format)
+- serial: 12 alphanum as shown
+- battery: battery info as shown (e.g., "100%" or "100")
+- imei_bbox/serial_bbox: approximate normalized [0..1] box around the value texts if possible; else null
+- Output valid JSON only, no markdown, no trailing comments.
+`.trim()
 
-      const content = res.choices?.[0]?.message?.content ?? '{}'
-      let parsed: any = {}
-      try {
-        parsed = JSON.parse(content)
-      } catch {
-        const jsonLike = content.match(/\{[\s\S]*\}/)?.[0]
-        parsed = jsonLike ? JSON.parse(jsonLike) : {}
-      }
+    // Vision: chat.completions + image_url（Node SDK v4 互換の書き方）
+    const res = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      temperature: 0.1,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: imageBase64 } },
+          ],
+        },
+      ],
+    })
 
-      const fields = {
-        imeiCandidates: Array.isArray(parsed.imeiCandidates) ? parsed.imeiCandidates : [],
-        serialCandidates: Array.isArray(parsed.serialCandidates) ? parsed.serialCandidates : [],
-        modelCandidates: Array.isArray(parsed.modelCandidates) ? parsed.modelCandidates : [],
-        modelNumberFull: typeof parsed.modelNumberFull === 'string' ? parsed.modelNumberFull : null,
-        batteryPercent:
-          typeof parsed.batteryPercent === 'number' && Number.isFinite(parsed.batteryPercent)
-            ? Math.max(0, Math.min(100, Math.round(parsed.batteryPercent)))
-            : null,
-        modelName: typeof parsed.modelName === 'string' ? parsed.modelName : null,
-        capacity: typeof parsed.capacity === 'string' ? parsed.capacity : null,
-        color: typeof parsed.color === 'string' ? parsed.color : null,
-      }
-      const b = parsed?.bboxes || {}
-      const bboxes = {
-        imei: Array.isArray(b?.imei) ? b.imei : [],
-        serial: Array.isArray(b?.serial) ? b.serial : [],
-      }
-
-      return NextResponse.json({ ok: true, fields, bboxes })
-    } catch (e: any) {
-      const status = typeof e?.status === 'number' ? e.status : 500
-      if (status === 429) {
-        const retryAfterHeader = e?.headers?.get?.('retry-after') ?? e?.response?.headers?.get?.('retry-after')
-        const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) || 30 : 30
-        return NextResponse.json({ ok: false, error: 'RATE_LIMIT', retryAfterSeconds }, { status: 429 })
-      }
-      return NextResponse.json({ ok: false, error: e?.message ?? 'unknown' }, { status })
+    const raw = res.choices?.[0]?.message?.content ?? '{}'
+    let parsed: any = {}
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      const m = raw.match(/\{[\s\S]*\}/)?.[0]
+      parsed = m ? JSON.parse(m) : {}
     }
-  })
+
+    const data = {
+      model_name: typeof parsed?.model_name === 'string' ? parsed.model_name : null,
+      capacity: typeof parsed?.capacity === 'string' ? parsed.capacity : null,
+      color: typeof parsed?.color === 'string' ? parsed.color : null,
+      model_number: typeof parsed?.model_number === 'string' ? parsed.model_number : null,
+      imei: typeof parsed?.imei === 'string' ? parsed.imei : null,
+      serial: typeof parsed?.serial === 'string' ? parsed.serial : null,
+      battery: typeof parsed?.battery === 'string' ? parsed.battery : (
+        typeof parsed?.battery === 'number' ? String(parsed.battery) : null
+      ),
+    }
+
+    const imei_bbox = parsed?.imei_bbox && typeof parsed.imei_bbox === 'object' ? parsed.imei_bbox : null
+    const serial_bbox = parsed?.serial_bbox && typeof parsed.serial_bbox === 'object' ? parsed.serial_bbox : null
+
+    return NextResponse.json({ ok: true, data, imei_bbox, serial_bbox })
+  } catch (e: any) {
+    const msg = e?.message || 'OCR処理エラー'
+    const status = typeof e?.status === 'number' ? e.status : 500
+    return NextResponse.json({ ok: false, error: msg }, { status })
+  }
 }
