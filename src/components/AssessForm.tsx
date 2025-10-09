@@ -161,22 +161,25 @@ export default function AssessForm(): JSX.Element {
 
   useEffect(() => { setGeoResult(null) }, [device.carrier])
 
-  async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
-    const items = e.clipboardData?.items
-    if (!items) return
-    for (const it of items) {
-      if (it.type.startsWith('image/')) {
-        const f = it.getAsFile()
-        if (!f) continue
-        const raw = await fileToBase64(f)
-        const light = await downscaleBase64(raw, 1400)
-        setImgBase64(light)
-        setMessage('画像貼り付け完了。「機種情報取得・反映」で文字取得 → 「画像からIMEI/シリアルを切り抜き」で切り抜き実行')
-        e.preventDefault()
-        return
-      }
+  /** 貼り付け（Snipping Tool → Ctrl+V） */
+async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
+  const items = e.clipboardData?.items
+  if (!items) return
+  for (const it of items) {
+    if (it.type.startsWith('image/')) {
+      const f = it.getAsFile()
+      if (!f) continue
+      const raw = await fileToBase64(f)
+      // ★ 1200px まで縮小（トークン節約をさらに強化）
+      const light = await downscaleBase64(raw, 1200)
+      setImgBase64(light)
+      setMessage('画像貼り付け完了。「機種情報取得・反映」で文字取得 → 「画像からIMEI/シリアルを切り抜き」で切り抜き実行')
+      e.preventDefault()
+      return
     }
   }
+}
+
 
   // ROIベースで小画像に分割してから一括OCR
   async function runOCRInfo() {
@@ -184,54 +187,63 @@ export default function AssessForm(): JSX.Element {
     setOcrLoading(true)
     setMessage('機種情報取得中…')
 
-    try {
-      const tiles = await cropByROI(imgBase64)
-      const reqTiles = [
-        { key: 'modelName', imageBase64: tiles.modelName! },
-        { key: 'capacity', imageBase64: tiles.capacity! },
-        { key: 'color', imageBase64: tiles.color! },
-        { key: 'salesModelFull', imageBase64: tiles.salesModel! },
-        { key: 'imei', imageBase64: tiles.imei! },
-        { key: 'serial', imageBase64: tiles.serial! },
-      ].filter(t => !!t.imageBase64)
+     // 小さめにして送信トークン削減（貼り付け時に縮小済みでもOK）
+  const tiles = await cropByROI(imgBase64)
+  const reqTiles = [
+    { key: 'modelName',      imageBase64: tiles.modelName! },
+    { key: 'capacity',       imageBase64: tiles.capacity! },
+    { key: 'color',          imageBase64: tiles.color! },
+    { key: 'salesModelFull', imageBase64: tiles.salesModel! },
+    { key: 'imei',           imageBase64: tiles.imei! },
+    { key: 'serial',         imageBase64: tiles.serial! },
+  ].filter(t => !!t.imageBase64)
 
+  // 429を考慮した最大5回のリトライ（Retry-After優先 + 指数バックオフ + ジッター）
+  const maxAttempts = 5
+  let attempt = 0
+  let lastErrText = ''
+
+  while (attempt < maxAttempts) {
+    attempt++
+    try {
       const res = await fetch('/api/ocr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: 'tile', tiles: reqTiles }),
       })
 
-      // 429なら少し待って1回だけ再試行
       if (res.status === 429) {
-        const json = await res.json().catch(() => ({}))
-        const wait = Number(json?.retryAfterSeconds ?? 20)
-        setMessage(`OCR待機中… レート制限（約 ${wait} 秒後に再試行）`)
-        await new Promise(r => setTimeout(r, Math.max(1, wait) * 1000))
-        const res2 = await fetch('/api/ocr', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mode: 'tile', tiles: reqTiles }),
-        })
-        if (!res2.ok) {
-          const t = await res2.text()
-          setMessage(`OCR失敗：${t.slice(0, 140)}…`); setOcrLoading(false); return
-        }
-        const j2 = await res2.json()
-        applyTileResult(j2?.tiles || {})
-        return
+        // サーバ返却の retryAfterSeconds を優先
+        let waitSec = 25
+        try {
+          const j = await res.json()
+          if (typeof j?.retryAfterSeconds === 'number') waitSec = Math.max(10, Math.min(90, j.retryAfterSeconds))
+        } catch {}
+        const extra = Math.min(12, Math.pow(2, attempt)) + Math.floor(Math.random() * 3)
+        const totalWait = waitSec + extra
+        setMessage(`OCR待機中…（レート制限）約 ${totalWait} 秒後に再試行（${attempt}/${maxAttempts}）`)
+        await new Promise(r => setTimeout(r, totalWait * 1000))
+        continue
       }
 
       if (!res.ok) {
-        const t = await res.text()
-        setMessage(`OCR失敗：${t.slice(0, 140)}…`); return
+        lastErrText = await res.text().catch(() => `${res.status} ${res.statusText}`)
+        throw new Error(lastErrText || 'HTTP error')
       }
 
       const json = await res.json()
       applyTileResult(json?.tiles || {})
-    } catch (e: any) {
-      setMessage(`OCR失敗：${e?.message ?? 'unknown error'}`)
-    } finally {
       setOcrLoading(false)
+      return
+    } catch (e: any) {
+      if (attempt >= maxAttempts) {
+        setMessage(`OCR失敗：レート制限または通信失敗により中断しました。${lastErrText || e?.message || ''}`)
+        setOcrLoading(false)
+        return
+      }
+      const extra = Math.min(10, Math.pow(2, attempt)) + Math.floor(Math.random() * 3)
+      setMessage(`OCR再試行準備中… 約 ${extra} 秒待機（${attempt}/${maxAttempts}）`)
+      await new Promise(r => setTimeout(r, extra * 1000))
     }
   }
 
