@@ -178,69 +178,98 @@ export default function AssessForm(): JSX.Element {
     }
   }
 
-  // ===== ROIベースで小画像に分割してから一括OCR（強化リトライ） =====
-  async function runOCRInfo() {
-    if (!imgBase64 || ocrLoading) return
-    setOcrLoading(true)
-    setMessage('機種情報取得中…')
 
-    const tiles = await cropByROI(imgBase64)
-    const reqTiles = [
-      { key: 'modelName',      imageBase64: tiles.modelName! },
-      { key: 'capacity',       imageBase64: tiles.capacity! },
-      { key: 'color',          imageBase64: tiles.color! },
-      { key: 'salesModelFull', imageBase64: tiles.salesModel! },
-      { key: 'imei',           imageBase64: tiles.imei! },
-      { key: 'serial',         imageBase64: tiles.serial! },
-    ].filter(t => !!t.imageBase64)
+// ===== ROIベースで小画像に分割してから一括OCR（強化リトライ） =====
+async function runOCRInfo() {
+  if (!imgBase64 || ocrLoading) return
+  setOcrLoading(true)
+  setMessage('機種情報取得中…')
 
-    const maxAttempts = 5
-    let attempt = 0
-    let lastErrText = ''
+  // ★ ここから：API は { imageBase64 } を受け付ける最小構成に戻したので、単発送信に統一
+  const maxAttempts = 5
+  let attempt = 0
+  let lastErrText = ''
 
-    while (attempt < maxAttempts) {
-      attempt++
-      try {
-        const res = await fetch('/api/ocr', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mode: 'tile', tiles: reqTiles }),
-        })
+  while (attempt < maxAttempts) {
+    attempt++
+    try {
+      const res = await fetch('/api/ocr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageBase64: imgBase64 }),
+      })
 
-        if (res.status === 429) {
-          let waitSec = 25
-          try {
-            const j = await res.json()
-            if (typeof j?.retryAfterSeconds === 'number') waitSec = Math.max(10, Math.min(90, j.retryAfterSeconds))
-          } catch {}
-          const extra = Math.min(12, Math.pow(2, attempt)) + Math.floor(Math.random() * 3)
-          const totalWait = waitSec + extra
-          setMessage(`OCR待機中…（レート制限）約 ${totalWait} 秒後に再試行（${attempt}/${maxAttempts}）`)
-          await new Promise(r => setTimeout(r, totalWait * 1000))
-          continue
-        }
+      // 429（レート制限）：サーバが返す retryAfterSeconds を尊重
+      if (res.status === 429) {
+        let waitSec = 25
+        try {
+          const j = await res.json()
+          if (typeof j?.retryAfterSeconds === 'number') waitSec = Math.max(10, Math.min(90, j.retryAfterSeconds))
+        } catch {}
+        const extra = Math.min(12, Math.pow(2, attempt)) + Math.floor(Math.random() * 3)
+        const totalWait = waitSec + extra
+        setMessage(`OCR待機中…（レート制限）約 ${totalWait} 秒後に再試行（${attempt}/${maxAttempts}）`)
+        await new Promise(r => setTimeout(r, totalWait * 1000))
+        continue
+      }
 
-        if (!res.ok) {
-          lastErrText = await res.text().catch(() => `${res.status} ${res.statusText}`)
-          throw new Error(lastErrText || 'HTTP error')
-        }
+      const text = await res.text()
+      let json: any = null
+      try { json = JSON.parse(text) } catch {
+        lastErrText = text
+        throw new Error('OCR応答がJSONではありません')
+      }
 
-        const json = await res.json()
-        applyTileResult(json?.tiles || {})
+      if (!res.ok || json?.ok === false) {
+        lastErrText = JSON.stringify(json)
+        throw new Error(json?.error || `HTTP ${res.status} ${res.statusText}`)
+      }
+
+      // 期待フォーマット：{ ok:true, data:{...}, imei_bbox, serial_bbox }
+      const p: any = json?.data ?? {}
+
+      // APIの bbox が無ければ ROI をフォールバックとして採用
+      const imeiBox = json?.imei_bbox || ROI.table.imei
+      const serialBox = json?.serial_bbox || ROI.table.serial
+      setImeiBBox(imeiBox)
+      setSerialBBox(serialBox)
+
+      // 正規化は API 側でも軽く実施しているが、フロントでも上書き安全
+      const imeiNorm = normalizeIMEI(p.imei)
+      const serialNorm = normalizeSerial(p.serial)
+
+      setDevice(d => ({
+        ...d,
+        model_name: p.model_name ?? d.model_name,
+        capacity: p.capacity ?? d.capacity,
+        color: p.color ?? d.color,
+        // ★ モデル番号はフル（例：MWC62 J/A）をそのまま保持
+        model_number: p.model_number ?? d.model_number,
+        imei: imeiNorm || p.imei || d.imei,
+        serial: serialNorm || p.serial || d.serial,
+        battery: p.battery ?? d.battery,
+      }))
+
+      // 右側プレビュー用に即クロップ（bbox は上で確定）
+      if (imgBase64 && imeiBox) { cropFromBase64ByBbox(imgBase64, imeiBox).then(u => u && setImeiCrop(u)) }
+      if (imgBase64 && serialBox) { cropFromBase64ByBbox(imgBase64, serialBox).then(u => u && setSerialCrop(u)) }
+
+      setMessage('OCR完了：必要項目を反映しました（切り抜きは右プレビューに表示）')
+      setOcrLoading(false)
+      return
+    } catch (e: any) {
+      if (attempt >= maxAttempts) {
+        setMessage(`OCR失敗：レート制限または通信失敗により中断しました。${lastErrText || e?.message || ''}`)
         setOcrLoading(false)
         return
-      } catch (e: any) {
-        if (attempt >= maxAttempts) {
-          setMessage(`OCR失敗：レート制限または通信失敗により中断しました。${lastErrText || e?.message || ''}`)
-          setOcrLoading(false)
-          return
-        }
-        const extra = Math.min(10, Math.pow(2, attempt)) + Math.floor(Math.random() * 3)
-        setMessage(`OCR再試行準備中… 約 ${extra} 秒待機（${attempt}/${maxAttempts}）`)
-        await new Promise(r => setTimeout(r, extra * 1000))
       }
+      const extra = Math.min(10, Math.pow(2, attempt)) + Math.floor(Math.random() * 3)
+      setMessage(`OCR再試行準備中… 約 ${extra} 秒待機（${attempt}/${maxAttempts}）`)
+      await new Promise(r => setTimeout(r, extra * 1000))
     }
   }
+}
+
 
   function applyTileResult(tiles: any) {
     const imeiNorm = normalizeIMEI(String(tiles.imei || '')) || ''
