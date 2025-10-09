@@ -1,465 +1,521 @@
 // src/components/AssessForm.tsx
 'use client'
-import React from 'react'
-
-type BBox = { x: number; y: number; w: number; h: number }
-type BBoxMap = Record<string, BBox[]>
-type OcrFields = {
-  imeiCandidates?: string[]
-  serialCandidates?: string[]
-  modelCandidates?: string[]
-  batteryPercent?: number | null
-}
+import React, { useState, useEffect } from 'react'
+import { normalizeIMEI, normalizeSerial } from '../lib/ocrPostprocess'
 
 const STAFFS = ['島野文宏', '島野ひとみ', '中田颯', '（その他）'] as const
-const CARRIERS = ['docomo', 'au', 'SoftBank', '楽天モバイル', 'SIMフリー'] as const
-const CONDITIONS = ['S（新品未使用）', 'A（新品同等/交換未使用）', 'B（良品）', 'C（並品）', 'D（傷多め）', 'ジャンク'] as const
+const ACCESSORIES = ['有', '無', ''] as const
+const LOCK_YN = ['無', '有', ''] as const
+const CONDITIONS = [
+  { code: 'S', label: 'S（新品未使用）' },
+  { code: 'A', label: 'A（交換未使用品・新品同様品）' },
+  { code: 'B', label: 'B（目立つ傷なく、使用感が少ない）' },
+  { code: 'C', label: 'C（目に見える傷、使用感がある）' },
+  { code: 'D', label: 'D（目立つ傷、使用感が多数ある）' },
+  { code: 'ジャンク', label: 'ジャンク' },
+] as const
+const CARRIERS = ['SoftBank', 'au(KDDI)', 'docomo', '楽天モバイル', 'SIMフリー'] as const
 const RESTRICTS = ['○', '△', '×', '-'] as const
-const ACCESSORIES = ['箱', 'ケーブル', 'アダプタ', 'イヤホン', 'SIMピン', '説明書'] as const
 
-export default function AssessForm() {
-  // --- OCR / 画像関連 ---
-  const [imageBase64, setImageBase64] = React.useState<string | null>(null)
-  const [bboxMap, setBboxMap] = React.useState<BBoxMap>({})
-  const [isExtracting, setIsExtracting] = React.useState(false)
-  const [errorMsg, setErrorMsg] = React.useState<string | null>(null)
+type GeoRow = {
+  title: string
+  url?: string
+  carrier?: string
+  unused?: number
+  used?: number
+  unusedText?: string
+  usedText?: string
+}
 
-  // --- 基本情報 ---
-  const [staff, setStaff] = React.useState<string>(STAFFS[0])
-  const [receivedAt, setReceivedAt] = React.useState<string>(() => {
-    const dt = new Date()
-    const yyyy = dt.getFullYear()
-    const mm = String(dt.getMonth() + 1).padStart(2, '0')
-    const dd = String(dt.getDate()).padStart(2, '0')
-    return `${yyyy}-${mm}-${dd}`
+type BBox = { x: number; y: number; w: number; h: number } | null
+
+const section: React.CSSProperties = { border: '1px solid #e5e7eb', borderRadius: 10, padding: 12, background: '#fff' }
+const label: React.CSSProperties = { fontWeight: 600, fontSize: 13 }
+const box: React.CSSProperties = { width: '100%', padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 8 }
+const row2 = { display: 'grid', gridTemplateColumns: '160px 1fr', gap: 10, alignItems: 'center' } as const
+const row4 = { display: 'grid', gridTemplateColumns: '160px 1fr 160px 1fr', gap: 10, alignItems: 'center' } as const
+
+async function cropFromBase64ByBbox(imageBase64: string, bbox: { x: number; y: number; w: number; h: number }): Promise<string | null> {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      const sx = Math.max(0, Math.round(bbox.x * img.width))
+      const sy = Math.max(0, Math.round(bbox.y * img.height))
+      const sw = Math.max(1, Math.round(bbox.w * img.width))
+      const sh = Math.max(1, Math.round(bbox.h * img.height))
+      const out = document.createElement('canvas')
+      out.width = sw
+      out.height = sh
+      const ctx = out.getContext('2d')!
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh)
+      resolve(out.toDataURL('image/png'))
+    }
+    img.onerror = () => resolve(null)
+    img.src = imageBase64
   })
-  const [customerName, setCustomerName] = React.useState<string>('')
-  const [customerPhone, setCustomerPhone] = React.useState<string>('')
+}
 
-  // --- 端末情報 ---
-  const [carrier, setCarrier] = React.useState<string>(CARRIERS[0])
-  const [model, setModel] = React.useState<string>('') // 例：MLJH3 J/A → MLJH3
-  const [imei, setImei] = React.useState<string>('')
-  const [serial, setSerial] = React.useState<string>('')
-  const [batteryPct, setBatteryPct] = React.useState<string>('') // 数字文字列
-  const [restrict, setRestrict] = React.useState<string>(RESTRICTS[3]) // -
-  const [warrantyNote, setWarrantyNote] = React.useState<string>('') // Apple保証等
-  const [condition, setCondition] = React.useState<string>(CONDITIONS[2])
-  const [accessories, setAccessories] = React.useState<string[]>([])
-  const [notes, setNotes] = React.useState<string>('')
+/** 画像を最大幅 1400px に縮小してから base64 返す（貼り付けサイズ最適化） */
+async function downscaleBase64(dataUrl: string, maxW = 1400): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      const scale = img.width > maxW ? maxW / img.width : 1
+      if (scale >= 1) return resolve(dataUrl)
+      const w = Math.round(img.width * scale)
+      const h = Math.round(img.height * scale)
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')!
+      ctx.imageSmoothingQuality = 'high'
+      ctx.drawImage(img, 0, 0, w, h)
+      resolve(canvas.toDataURL('image/jpeg', 0.9))
+    }
+    img.onerror = () => resolve(dataUrl)
+    img.src = dataUrl
+  })
+}
 
-  // --- 価格情報（取得結果の参照リンク等） ---
-  const [amemobaUrl, setAmemobaUrl] = React.useState<string | null>(null)
-  const [amemobaFirst, setAmemobaFirst] = React.useState<string | null>(null)
-  const [geoUrl, setGeoUrl] = React.useState<string | null>(null)
-  const [geoUnused, setGeoUnused] = React.useState<string | null>(null)
-  const [geoUsed, setGeoUsed] = React.useState<string | null>(null)
+function fileToBase64(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(r.result as string)
+    r.onerror = reject
+    r.readAsDataURL(file)
+  })
+}
 
-  // --- 社内査定金額 ---
-  const [offerPrice, setOfferPrice] = React.useState<string>('') // 提示額
-  const [maxPrice, setMaxPrice] = React.useState<string>('') // 目安 MAX
-  const [deductions, setDeductions] = React.useState<string>('') // 減額理由サマリ
+export default function AssessForm(): JSX.Element {
+  // 受付
+  const [staff, setStaff] = useState('島野ひとみ')
+  const [acceptedAt, setAcceptedAt] = useState(() => new Date().toISOString().slice(0, 10))
 
-  // --- クリップボード / ウィンドウ操作可能か ---
-  const canClipboard = typeof navigator !== 'undefined' && !!navigator.clipboard?.writeText
-  const canOpen = typeof window !== 'undefined' && !!window.open
+  // お客様情報（今は手入力；将来フォーム連携）
+  const [customerSelect, setCustomerSelect] = useState('（最新が先頭）')
+  const [customer, setCustomer] = useState({ name: '', kana: '', address: '', phone: '', birth: '' })
 
-  // 画像ペースト
-  React.useEffect(() => {
-    const onPaste = (e: ClipboardEvent) => {
-      const items = e.clipboardData?.items
-      if (!items) return
-      for (const it of items) {
-        if (it.type.indexOf('image') !== -1) {
-          const file = it.getAsFile()
-          if (!file) continue
-          const reader = new FileReader()
-          reader.onload = () => {
-            setImageBase64(reader.result as string)
-            setErrorMsg(null)
-          }
-          reader.readAsDataURL(file)
-          break
-        }
+  // 端末
+  const [device, setDevice] = useState({
+    model_name: '', capacity: '', color: '', model_number: '',
+    imei: '', serial: '', battery: '', carrier: '', restrict: ''
+  })
+
+  // 付属品/ロック/状態
+  const [acc, setAcc] = useState(''); const [simLock, setSimLock] = useState(''); const [actLock, setActLock] = useState('')
+  const [condition, setCondition] = useState('B'); const [conditionNote, setConditionNote] = useState('')
+
+  // 価格
+  const [maxPrice, setMaxPrice] = useState<number | ''>(''); const [discount, setDiscount] = useState<number | ''>(''); const [todayPrice, setTodayPrice] = useState<number>(0)
+
+  // 競合（ゲオ）
+  const [geoLoading, setGeoLoading] = useState(false)
+  const [geoError, setGeoError] = useState<string | null>(null)
+  const [geoResult, setGeoResult] = useState<GeoRow | null>(null)
+  const [geoSearchUrl, setGeoSearchUrl] = useState<string | null>(null)
+
+  // 画像 / OCR
+  const [imgBase64, setImgBase64] = useState<string | null>(null)
+  const [message, setMessage] = useState('')
+  const [ocrLoading, setOcrLoading] = useState(false)
+  const [cropLoading, setCropLoading] = useState(false)
+  const [imeiCrop, setImeiCrop] = useState<string | null>(null)
+  const [serialCrop, setSerialCrop] = useState<string | null>(null)
+  const [imeiBBox, setImeiBBox] = useState<BBox>(null)
+  const [serialBBox, setSerialBBox] = useState<BBox>(null)
+
+  useEffect(() => {
+    const max = typeof maxPrice === 'number' ? maxPrice : Number(maxPrice || 0)
+    const disc = typeof discount === 'number' ? discount : Number(discount || 0)
+    setTodayPrice(Math.max(0, max - disc))
+  }, [maxPrice, discount])
+
+  /** 貼り付け（Snipping Tool → Ctrl+V） */
+  async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
+    const items = e.clipboardData?.items
+    if (!items) return
+    for (const it of items) {
+      if (it.type.startsWith('image/')) {
+        const f = it.getAsFile()
+        if (!f) continue
+        const raw = await fileToBase64(f)
+        const light = await downscaleBase64(raw, 1400)
+        setImgBase64(light)
+        setMessage('画像貼り付け完了。「機種情報取得・反映」で文字取得 → 「画像からIMEI/シリアルを切り抜き」で切り抜き実行')
+        e.preventDefault()
+        return
       }
     }
-    window.addEventListener('paste', onPaste as any)
-    return () => window.removeEventListener('paste', onPaste as any)
-  }, [])
+  }
 
-  // 共通 fetch（Timeout付き）
-  async function safeJsonFetch(path: string, body: any, timeoutMs = 25000) {
-    const controller = new AbortController()
-    const t = setTimeout(() => controller.abort(), timeoutMs)
+  /** 機種情報取得・反映（OCR：テキストのみ） — API互換対応版 */
+  async function runOCRInfo() {
+    if (!imgBase64 || ocrLoading) return
+    setOcrLoading(true)
+    setMessage('機種情報取得中…')
     try {
-      const res = await fetch(path, {
+      const res = await fetch('/api/ocr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: controller.signal,
+        body: JSON.stringify({ imageBase64: imgBase64, mode: 'extractInfo' }),
       })
-      if (!res.ok) throw new Error(await res.text())
-      return await res.json()
+      const text = await res.text()
+      let json: any = null
+      try { json = JSON.parse(text) } catch {
+        setMessage(`OCR失敗：応答がJSONではありません / ${text.slice(0, 140)}…`)
+        return
+      }
+      if (json?.ok === false) {
+        setMessage(`OCR失敗：${json?.error || 'unknown'}`)
+        return
+      }
+
+      // ===== 新APIフォーマットを旧UI項目へマッピング =====
+      const fields = json?.fields ?? {}
+      const bboxes = json?.bboxes ?? {}
+      // bbox は保持だけ（切り抜きは別ボタンで）
+      const imeiBox = (bboxes?.imei?.[0] ?? bboxes?.IMEI?.[0] ?? null)
+      const serialBox = (bboxes?.serial?.[0] ?? bboxes?.Serial?.[0] ?? null)
+      setImeiBBox(imeiBox)
+      setSerialBBox(serialBox)
+
+      const imeiNorm = normalizeIMEI((fields.imeiCandidates?.[0] ?? '') as string) || ''
+      const serialNorm = normalizeSerial((fields.serialCandidates?.[0] ?? '') as string) || ''
+      const modelFront = (fields.modelCandidates?.[0] ?? '').toString()
+      const batteryPct = typeof fields.batteryPercent === 'number' && Number.isFinite(fields.batteryPercent)
+        ? `${Math.round(Math.max(0, Math.min(100, fields.batteryPercent)))}%`
+        : ''
+
+      setDevice(d => ({
+        ...d,
+        model_name: d.model_name,                 // OCRは任意（必要なら上書き可）
+        capacity: d.capacity,
+        color: d.color,
+        model_number: modelFront || d.model_number,
+        imei: imeiNorm || d.imei,
+        serial: serialNorm || d.serial,
+        battery: batteryPct || d.battery,
+      }))
+
+      setMessage('OCR完了：必要項目を反映しました（切り抜きは別ボタンで実行）')
+    } catch (e: any) {
+      setMessage(`OCR失敗：${e?.message ?? 'unknown error'}`)
     } finally {
-      clearTimeout(t)
+      setOcrLoading(false)
     }
   }
 
-  // OCR → 即反映
-  const handleExtractAndPopulate = async () => {
-    if (isExtracting) return
-    setIsExtracting(true)
-    setErrorMsg(null)
+  /** 画像からIMEI/シリアルを切り抜き（bbox → crop） */
+  async function runCrop() {
+    if (!imgBase64) return setMessage('先に画像を貼り付けてください')
+    if (!imeiBBox && !serialBBox) return setMessage('先に「機種情報取得・反映」を実行してbboxを取得してください')
+    setCropLoading(true)
+    setMessage('切り抜き実行中…')
     try {
-      if (!imageBase64) throw new Error('画像を貼り付けてください（Ctrl+V）。')
-      const json = await safeJsonFetch('/api/ocr', { imageBase64, mode: 'extractInfo' }, 30000)
-      if (!json?.ok) throw new Error(json?.error ?? 'OCRに失敗しました。')
-      const fields: OcrFields = json.fields ?? {}
-      const bboxes: BBoxMap = json.bboxes ?? {}
-      setBboxMap(bboxes)
-
-      // 候補から即反映（必要に応じて手入力で修正可能）
-      if (fields.imeiCandidates?.[0]) setImei(pickBestImei(fields.imeiCandidates))
-      if (fields.serialCandidates?.[0]) setSerial(pickBestSerial(fields.serialCandidates))
-      if (fields.modelCandidates?.[0]) setModel(pickBestModel(fields.modelCandidates))
-      if (typeof fields.batteryPercent === 'number') setBatteryPct(String(fields.batteryPercent))
+      if (imeiBBox) {
+        const url = await cropFromBase64ByBbox(imgBase64, imeiBBox as any)
+        if (url) setImeiCrop(url)
+      }
+      if (serialBBox) {
+        const url = await cropFromBase64ByBbox(imgBase64, serialBBox as any)
+        if (url) setSerialCrop(url)
+      }
+      setMessage('切り抜き完了：右のプレビューで確認できます')
     } catch (e: any) {
-      setErrorMsg(e?.message ?? '処理に失敗しました。')
+      setMessage(`切り抜き失敗：${e?.message ?? 'unknown error'}`)
     } finally {
-      setIsExtracting(false)
+      setCropLoading(false)
     }
   }
 
-  // モデルの前半（5文字・英数のみ）を抽出
-  const modelPrefix = React.useMemo(() => {
-    const five = (model || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5)
-    return five.length === 5 ? five : ''
-  }, [model])
+  function getModelPrefix(): string {
+    const raw = (device.model_number || device.model_name || '').trim()
+    if (!raw) return ''
+    return raw.split(/\s+/)[0]
+  }
 
-  // Amemoba 検索
-  const handleAmemobaSearch = async () => {
-    if (!modelPrefix) return setErrorMsg('モデル番号の前半（例：MLJH3）を入力してください。')
+  /** amemoba 検索 — 新APIに合わせて送信＆オープン */
+  async function openAmemobaForSelectedCarrier() {
+    const key = getModelPrefix()
+    if (!key) return alert('モデル番号 または 機種名を入力してください')
+    if (!device.carrier) return alert('キャリアを選択してください')
+
+    setMessage(`amemoba検索中…（${key} / ${device.carrier}）`)
     try {
-      const resp = await safeJsonFetch('/api/amemoba-search', { modelPrefix, carrier }, 20000)
-      if (!resp.ok) throw new Error(resp.error || '検索に失敗しました')
-      setAmemobaUrl(resp.searchUrl || null)
-      setAmemobaFirst(resp.firstLink || null)
-      if (resp.firstLink && canOpen) window.open(resp.firstLink, '_blank', 'noopener,noreferrer')
+      const res = await fetch('/api/amemoba-search', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ modelPrefix: key, carrier: device.carrier }),
+      })
+      const json = await res.json()
+      if (!res.ok || json?.ok === false) {
+        setMessage(`検索失敗: ${json?.error || `${res.status} ${res.statusText}`}`)
+        const fallback = `https://amemoba.com/search/?search-word=${encodeURIComponent(key)}`
+        window.open(fallback, '_blank', 'noopener,noreferrer'); return
+      }
+      const url = json.firstLink || json.searchUrl || `https://amemoba.com/search/?search-word=${encodeURIComponent(key)}`
+      window.open(url, '_blank', 'noopener,noreferrer')
+      setMessage('検索完了：amemoba 検索ページを開きました')
     } catch (e: any) {
-      setErrorMsg(e.message)
+      setMessage(`検索失敗: ${e?.message ?? 'unknown'}`)
+      const url = `https://amemoba.com/search/?search-word=${encodeURIComponent(key)}`
+      window.open(url, '_blank', 'noopener,noreferrer')
     }
   }
 
-  // ゲオ価格取得
-  const handleGeoPrices = async () => {
-    if (!modelPrefix) return setErrorMsg('モデル番号の前半（例：MLJH3）を入力してください。')
+  /** GEO 価格取得 — 新APIに合わせて送信 */
+  async function fetchGeo() {
+    const key = getModelPrefix()
+    setGeoError(null); setGeoResult(null); setGeoLoading(true)
     try {
-      const resp = await safeJsonFetch('/api/geo-prices', { modelPrefix }, 20000)
-      if (!resp.ok) throw new Error(resp.error || 'ゲオ価格取得に失敗しました')
-      setGeoUrl(resp.geoUrl || null)
-      setGeoUnused(resp.prices?.unused ?? null)
-      setGeoUsed(resp.prices?.used ?? null)
+      const res = await fetch('/api/geo-prices', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ modelPrefix: key }),
+      })
+      const text = await res.text()
+      let json: any = null
+      try { json = JSON.parse(text) } catch {
+        setGeoError(`応答がJSONではありません: HTTP ${res.status} ${res.statusText} / ${text.slice(0, 140)}…`)
+        setGeoLoading(false); return
+      }
+      setGeoSearchUrl(json?.geoUrl ?? null)
+      if (!res.ok || json?.ok === false) {
+        setGeoError(json?.error || `HTTP ${res.status} ${res.statusText}`)
+        setGeoLoading(false); return
+      }
+      const row: GeoRow = {
+        title: '検索結果',
+        url: json?.geoUrl ?? undefined,
+        carrier: undefined,
+        unusedText: json?.prices?.unused ?? undefined,
+        usedText: json?.prices?.used ?? undefined,
+      }
+      setGeoResult(row)
     } catch (e: any) {
-      setErrorMsg(e.message)
-    }
+      setGeoError(e?.message ?? 'unknown')
+    } finally { setGeoLoading(false) }
   }
 
-  // 利用制限/保証 ショートカット
-  const openRestrictCheck = async () => {
-    if (imei && canClipboard) await navigator.clipboard.writeText(imei)
-    if (canOpen) window.open('https://snowyskies.jp/imeiChecking/', '_blank', 'noopener,noreferrer')
-  }
-  const openWarrantyCheck = async () => {
-    if (serial && canClipboard) await navigator.clipboard.writeText(serial)
-    if (canOpen) window.open('https://checkcoverage.apple.com/?locale=ja_JP', '_blank', 'noopener,noreferrer')
-  }
-
-  // Chatwork貼り付け用テンプレ
-  const handleCopyChatwork = async () => {
-    const lines = [
-      '【査定受付】',
-      `担当者: ${staff}`,
-      `受付日: ${receivedAt}`,
-      `お客様: ${customerName || '-'}  / TEL: ${customerPhone || '-'}`,
-      `キャリア: ${carrier}  / モデル: ${model || '-'}  / IMEI: ${imei || '-'}  / Serial: ${serial || '-'}`,
-      `バッテリー: ${batteryPct ? batteryPct + '%' : '-'}`,
-      `状態: ${condition} / 利用制限: ${restrict} / 保証: ${warrantyNote || '-'}`,
-      `付属品: ${accessories.length ? accessories.join(' / ') : '-'}`,
-      `メモ: ${notes || '-'}`,
-      `---`,
-      `参考: Amemoba ${amemobaFirst || amemobaUrl || '-'} / GEO ${geoUrl || '-'}`,
-      `GEO未使用: ${geoUnused || '-'} / GEO中古: ${geoUsed || '-'}`,
-      `提示額: ${offerPrice || '-'} / MAX目安: ${maxPrice || '-'} / 減額理由: ${deductions || '-'}`,
-    ]
-    const text = lines.join('\n')
-    if (canClipboard) {
-      await navigator.clipboard.writeText(text)
-      alert('Chatwork用の文面をコピーしました。')
-    } else {
-      console.log(text)
-      alert('クリップボード未対応の環境です。コンソールに出力しました。')
-    }
-  }
-
-  // OCR候補から最適化（簡易）
-  function onlyDigits(s: string) { return s.replace(/\D+/g, '') }
-  function luhnCheck(num: string): boolean {
-    const arr = num.split('').map((d) => parseInt(d, 10))
-    if (arr.length !== 15 || arr.some((n) => Number.isNaN(n))) return false
-    let sum = 0
-    for (let i = 0; i < 14; i++) {
-      let n = arr[i]
-      if (i % 2 === 1) { n = n * 2; if (n > 9) n = n - 9 }
-      sum += n
-    }
-    const checkDigit = (10 - (sum % 10)) % 10
-    return checkDigit === arr[14]
-  }
-  function normalizeIMEI(raw: string): string | null {
-    const s = raw.replace(/[Oo]/g, '0').replace(/[Il]/g, '1').replace(/Z/g, '2').replace(/S/g, '5').replace(/B/g, '8')
-    const digits = onlyDigits(s).slice(0, 15)
-    return digits.length === 15 ? digits : null
-  }
-  function normalizeSerial(raw: string): string {
-    let s = raw.trim().toUpperCase()
-    s = s.replace(/O/g, '0').replace(/I/g, '1').replace(/Z(?![0-9])/g, '2')
-    s = s.replace(/[^0-9A-Z]/g, '')
-    return s.length >= 12 ? s.slice(0, 12) : s
-  }
-  function pickBestImei(cands?: string[]): string {
-    if (!cands || cands.length === 0) return ''
-    for (const c of cands) { const n = normalizeIMEI(c); if (n && luhnCheck(n)) return n }
-    for (const c of cands) { const d = onlyDigits(c); if (d.length === 15 && luhnCheck(d)) return d }
-    for (const c of cands) { const d = onlyDigits(c); if (d.length === 15) return d }
-    return ''
-  }
-  function pickBestSerial(cands?: string[]): string {
-    if (!cands || cands.length === 0) return ''
-    for (const c of cands) { const s = normalizeSerial(c); if (s.length === 12) return s }
-    let best = ''
-    for (const c of cands) { const s = normalizeSerial(c); if (s.length > best.length) best = s }
-    return best
-  }
-  function pickBestModel(cands?: string[]): string {
-    if (!cands || cands.length === 0) return ''
-    const regex = /^[A-Z0-9]{5}$/
-    const strong = cands.find((c) => regex.test(c.toUpperCase()))
-    return (strong ?? cands[0]).toUpperCase()
-  }
-
-  // 付属品トグル
-  const toggleAccessory = (key: string) => {
-    setAccessories((prev) =>
-      prev.includes(key) ? prev.filter((x) => x !== key) : [...prev, key]
-    )
+  async function copyAndOpen(text: string, url: string) {
+    try { if (text) await navigator.clipboard.writeText(text) } catch {}
+    window.open(url, '_blank', 'noopener,noreferrer')
   }
 
   return (
-    <div className="flex flex-col gap-6">
-      {/* 操作ガイド */}
-      <div className="rounded-lg border bg-white p-4">
-        <div className="text-sm text-gray-600">
-          画像は <b>Snipping Tool → Ctrl+V</b> で貼り付け → <b>機種情報取得・反映</b> を押下。
-          取得後、必要に応じて手修正してください。
+    <div style={{ display: 'grid', gap: 16, padding: 16, maxWidth: 980, margin: '0 auto', background: '#f6f7fb' }}>
+      <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, textAlign: 'center' }}>アメモバ買取 富山店　査定受付票</h2>
+
+      {/* 受付 */}
+      <div style={section}>
+        <div style={row4}>
+          <div style={label}>担当者</div>
+          <select style={box as any} value={staff} onChange={(e) => setStaff(e.target.value)}>
+            {STAFFS.map(s => (<option key={s} value={s}>{s}</option>))}
+          </select>
+          <div style={label}>受付日</div>
+          <input style={box as any} type="date" value={acceptedAt} onChange={(e) => setAcceptedAt(e.target.value)} />
         </div>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            className="rounded-md bg-black px-3 py-2 text-white disabled:opacity-60"
-            onClick={handleExtractAndPopulate}
-            disabled={isExtracting || !imageBase64}
-          >
-            {isExtracting ? '機種情報取得中…' : '機種情報取得・反映'}
-          </button>
-          <button
-            className="rounded-md border px-3 py-2"
-            onClick={openRestrictCheck}
-            title="IMEIをコピーして利用制限確認サイトを開きます"
-          >
-            利用制限確認（IMEI→コピー）
-          </button>
-          <button
-            className="rounded-md border px-3 py-2"
-            onClick={openWarrantyCheck}
-            title="SerialをコピーしてApple保証確認サイトを開きます"
-          >
-            保証状態確認（Serial→コピー）
-          </button>
-          <button
-            className="rounded-md border px-3 py-2"
-            onClick={handleCopyChatwork}
-            title="Chatworkへ貼り付ける用のテンプレをコピー"
-          >
-            Chatworkテンプレをコピー
-          </button>
-        </div>
-        {errorMsg && <div className="mt-3 text-sm text-red-600">{errorMsg}</div>}
       </div>
 
-      {/* 基本情報 */}
-      <section className="rounded-lg border bg-white p-4">
-        <h3 className="mb-3 text-base font-semibold">基本情報</h3>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs text-gray-500">担当者</span>
-            <select className="rounded border p-2" value={staff} onChange={(e) => setStaff(e.target.value)}>
-              {STAFFS.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs text-gray-500">受付日</span>
-            <input type="date" className="rounded border p-2" value={receivedAt} onChange={(e) => setReceivedAt(e.target.value)} />
-          </label>
+      {/* お客様情報 */}
+      <div style={section}>
+        <div style={row4}>
+          <div style={label}>お客様選択</div>
+          <select style={box as any} value={customerSelect} onChange={(e) => setCustomerSelect(e.target.value)}>
+            <option>（最新が先頭）</option>
+          </select>
+          <div style={{ ...label }}>（ヒント）</div>
+          <div style={{ fontSize: 12, color: '#6b7280' }}>フォーム連携は今後追加。手入力でもOKです。</div>
         </div>
-        <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs text-gray-500">お名前</span>
-            <input className="rounded border p-2" value={customerName} onChange={(e) => setCustomerName(e.target.value)} />
-          </label>
-          <label className="flex flex-col gap-1 md:col-span-2">
-            <span className="text-xs text-gray-500">電話番号</span>
-            <input className="rounded border p-2" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} />
-          </label>
+        <div style={{ height: 8 }} />
+        <div style={row2}><div style={label}>お名前</div><input style={box as any} value={customer.name} onChange={(e)=>setCustomer({...customer,name:e.target.value})}/></div>
+        <div style={row2}><div style={label}>フリガナ</div><input style={box as any} value={customer.kana} onChange={(e)=>setCustomer({...customer,kana:e.target.value})}/></div>
+        <div style={row2}><div style={label}>ご住所</div><input style={box as any} value={customer.address} onChange={(e)=>setCustomer({...customer,address:e.target.value})}/></div>
+        <div style={row4}>
+          <div style={label}>電話番号</div><input style={box as any} value={customer.phone} onChange={(e)=>setCustomer({...customer,phone:e.target.value})}/>
+          <div style={label}>生年月日</div><input style={box as any} type="date" value={customer.birth} onChange={(e)=>setCustomer({...customer,birth:e.target.value})}/>
         </div>
-      </section>
+      </div>
 
-      {/* 端末情報 */}
-      <section className="rounded-lg border bg白 p-4">
-        <h3 className="mb-3 text-base font-semibold">端末情報</h3>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-          <label className="flex flex-col gap-1 md:col-span-1">
-            <span className="text-xs text-gray-500">キャリア</span>
-            <select className="rounded border p-2" value={carrier} onChange={(e) => setCarrier(e.target.value)}>
-              {CARRIERS.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 md:col-span-1">
-            <span className="text-xs text-gray-500">モデル番号（前半）</span>
-            <input className="rounded border p-2 uppercase" value={model} onChange={(e) => setModel(e.target.value)} placeholder="例: MLJH3" />
-          </label>
-          <label className="flex flex-col gap-1 md:col-span-1">
-            <span className="text-xs text-gray-500">IMEI（15桁）</span>
-            <input className="rounded border p-2" value={imei} onChange={(e) => setImei(e.target.value)} />
-          </label>
-          <label className="flex flex-col gap-1 md:col-span-1">
-            <span className="text-xs text-gray-500">シリアル（12桁）</span>
-            <input className="rounded border p-2" value={serial} onChange={(e) => setSerial(e.target.value)} />
-          </label>
-        </div>
-
-        <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-4">
-          <label className="flex flex-col gap-1 md:col-span-1">
-            <span className="text-xs text-gray-500">バッテリー（%）</span>
-            <input className="rounded border p-2" value={batteryPct} onChange={(e) => setBatteryPct(e.target.value)} />
-          </label>
-          <label className="flex flex-col gap-1 md:col-span-1">
-            <span className="text-xs text-gray-500">利用制限</span>
-            <select className="rounded border p-2" value={restrict} onChange={(e) => setRestrict(e.target.value)}>
-              {RESTRICTS.map((r) => <option key={r} value={r}>{r}</option>)}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 md:col-span-2">
-            <span className="text-xs text-gray-500">保証メモ（Apple保証など）</span>
-            <input className="rounded border p-2" value={warrantyNote} onChange={(e) => setWarrantyNote(e.target.value)} />
-          </label>
-        </div>
-
-        <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
-          <label className="flex flex-col gap-1 md:col-span-1">
-            <span className="text-xs text-gray-500">状態</span>
-            <select className="rounded border p-2" value={condition} onChange={(e) => setCondition(e.target.value)}>
-              {CONDITIONS.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </label>
-          <div className="md:col-span-2">
-            <div className="mb-1 text-xs text-gray-500">付属品</div>
-            <div className="flex flex-wrap gap-2">
-              {ACCESSORIES.map((a) => (
-                <button
-                  key={a}
-                  type="button"
-                  className={`rounded border px-2 py-1 text-sm ${accessories.includes(a) ? 'bg-black text-white' : 'bg-white'}`}
-                  onClick={() => toggleAccessory(a)}
-                >
-                  {a}
-                </button>
-              ))}
-            </div>
+      {/* 3uTools：貼付け＆OCR */}
+      <div style={section}>
+        <div style={row2}>
+          <div style={label}>3uTools画像</div>
+          <div
+            onPaste={handlePaste}
+            style={{ border: '2px dashed #cbd5e1', borderRadius: 10, minHeight: 180, display: 'grid', placeItems: 'center',
+                     color: '#6b7280', background: '#fafafa', textAlign: 'center', padding: 8 }}
+            title="ここに Ctrl+V でスクショを貼り付け"
+          >
+            {imgBase64
+              ? <img src={imgBase64} alt="pasted" style={{ maxWidth: '100%', maxHeight: 260, borderRadius: 8 }} />
+              : <div>ここをクリック → <b>Ctrl + V</b> でスクショを貼り付け</div>}
           </div>
         </div>
 
-        <div className="mt-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs text-gray-500">特記事項</span>
-            <textarea className="min-h-[80px] rounded border p-2" value={notes} onChange={(e) => setNotes(e.target.value)} />
-          </label>
-        </div>
-      </section>
-
-      {/* 参考価格ブロック */}
-      <section className="rounded-lg border bg-white p-4">
-        <h3 className="mb-3 text-base font-semibold">価格（参考）</h3>
-        <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-3">
-          <button className="rounded-md border px-3 py-2" onClick={handleAmemobaSearch} disabled={!modelPrefix}>
-            amemoba価格検索（{modelPrefix || '―――'} / {carrier}）
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
+          <button
+            onClick={runOCRInfo}
+            disabled={!imgBase64 || ocrLoading}
+            style={{ padding: '6px 12px', borderRadius: 8, border: '1px solid #ddd', opacity: (!imgBase64 || ocrLoading) ? 0.6 : 1 }}
+            title={!imgBase64 ? 'まずスクショを貼り付けてください' : '文字解析'}
+          >
+            {ocrLoading ? '取得中…' : '機種情報取得・反映'}
           </button>
-          <button className="rounded-md border px-3 py-2" onClick={handleGeoPrices} disabled={!modelPrefix}>
-            ゲオ価格（{modelPrefix || '―――'}）
+
+          <button
+            onClick={runCrop}
+            disabled={!imgBase64 || cropLoading}
+            style={{ padding: '6px 12px', borderRadius: 8, border: '1px solid #ddd', opacity: (!imgBase64 || cropLoading) ? 0.6 : 1 }}
+            title={!imgBase64 ? 'まずスクショを貼り付けてください' : 'bboxに従って切り抜き'}
+          >
+            {cropLoading ? '切り抜き中…' : '画像からIMEI/シリアルを切り抜き'}
           </button>
-          <div className="self-center text-sm text-gray-500">
-            ※ amemoba は対象ページを開いて確認／ゲオは一覧から価格文字列抽出
+
+          <div style={{ color: '#2563eb', fontSize: 13 }}>{message}</div>
+        </div>
+      </div>
+
+      {/* 端末情報 + クロッププレビュー */}
+      <div style={section}>
+        <div style={row4}>
+          <div style={label}>機種名</div><input style={box as any} value={device.model_name} onChange={(e)=>setDevice({...device,model_name:e.target.value})}/>
+          <div style={label}>容量</div><input style={box as any} value={device.capacity} onChange={(e)=>setDevice({...device,capacity:e.target.value})}/>
+        </div>
+        <div style={{ height: 8 }} />
+        <div style={row4}>
+          <div style={label}>カラー</div><input style={box as any} value={device.color} onChange={(e)=>setDevice({...device,color:e.target.value})}/>
+          <div style={label}>モデル番号</div><input style={box as any} value={device.model_number} onChange={(e)=>setDevice({...device,model_number:e.target.value})}/>
+        </div>
+
+        {imeiCrop && <div style={{ margin: '6px 0 2px 160px' }}><img src={imeiCrop} alt="imei-crop" style={{ maxHeight: 60, border: '1px solid #e5e7eb', borderRadius: 6 }}/></div>}
+        <div style={row4}>
+          <div style={label}>IMEI</div>
+          <input style={box as any} value={device.imei} onChange={(e)=>setDevice({...device,imei:e.target.value})}/>
+          <div />
+          <div style={{ display:'flex', gap:8 }}>
+            <button onClick={()=>copyAndOpen(device.imei,'https://snowyskies.jp/imeiChecking/')}
+                    style={{ padding:'6px 10px', borderRadius:8, border:'1px solid #ddd' }}>
+              利用制限確認
+            </button>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <div className="rounded border p-3">
-            <div className="text-sm font-semibold">amemoba</div>
-            <div className="mt-1 text-sm">
-              検索URL: {amemobaUrl ? <a href={amemobaUrl} target="_blank" className="text-blue-600 underline">開く</a> : '-'}
+        {serialCrop && <div style={{ margin: '6px 0 2px 160px' }}><img src={serialCrop} alt="serial-crop" style={{ maxHeight: 60, border: '1px solid #e5e7eb', borderRadius: 6 }}/></div>}
+        <div style={row4}>
+          <div style={label}>シリアル</div>
+          <input style={box as any} value={device.serial} onChange={(e)=>setDevice({...device,serial:e.target.value})}/>
+          <div />
+          <div style={{ display:'flex', gap:8 }}>
+            <button onClick={()=>copyAndOpen(device.serial,'https://checkcoverage.apple.com/?locale=ja_JP')}
+                    style={{ padding:'6px 10px', borderRadius:8, border:'1px solid #ddd' }}>
+              保証状態確認
+            </button>
+          </div>
+        </div>
+
+        <div style={row4}>
+          <div style={label}>バッテリー</div>
+          <input style={box as any} placeholder="例）100%" value={device.battery} onChange={(e)=>setDevice({...device,battery:e.target.value})}/>
+          <div style={label}>キャリア</div>
+          <select style={box as any} value={device.carrier} onChange={(e)=>setDevice({...device,carrier:e.target.value})}>
+            <option value=""/>{CARRIERS.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+
+        <div style={row4}>
+          <div style={label}>利用制限</div>
+          <select style={box as any} value={device.restrict} onChange={(e)=>setDevice({...device,restrict:e.target.value})}>
+            <option value=""/>{RESTRICTS.map(r => <option key={r} value={r}>{r}</option>)}
+          </select>
+          <div/><div/>
+        </div>
+      </div>
+
+      {/* 価格・検索・競合価格（復活） */}
+      <div style={section}>
+        <div style={row4}>
+          <div style={label}>MAX買取価格</div><input style={box as any} placeholder="例）51000" value={maxPrice} onChange={(e)=>setMaxPrice(e.target.value as any)}/>
+          <div style={label}>減額（合計）</div><input style={box as any} placeholder="例）3000" value={discount} onChange={(e)=>setDiscount(e.target.value as any)}/>
+        </div>
+        <div style={{ height: 8 }} />
+        <div style={row2}><div style={label}>本日査定金額</div><input style={box as any} value={todayPrice} readOnly/></div>
+
+        <div style={{ height: 10 }} />
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+            <button onClick={openAmemobaForSelectedCarrier}
+                    style={{ padding:'8px 12px', borderRadius:8, border:'1px solid #ddd' }}>
+              amemoba価格検索（{getModelPrefix() || 'キーワード未入力'} / {device.carrier || 'キャリア未選択'}）
+            </button>
+            <div style={{ color:'#6b7280', fontSize:12 }}>例：MLJH3 J/A → MLJH3 で検索</div>
+          </div>
+
+          <div style={{ border:'1px dashed #d1d5db', borderRadius:10, padding:8 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
+              <div style={{ fontWeight:700 }}>競合価格（ゲオ）</div>
+              <button onClick={fetchGeo} disabled={!getModelPrefix()} style={{ padding:'4px 8px', borderRadius:6, border:'1px solid #ddd' }}>
+                {geoLoading ? '更新中…' : '更新'}
+              </button>
+              {geoSearchUrl && <a href={geoSearchUrl} target="_blank" rel="noreferrer" style={{ color:'#2563eb', fontSize:12 }}>検索ページ</a>}
             </div>
-            <div className="mt-1 text-sm">
-              推定リンク: {amemobaFirst ? <a href={amemobaFirst} target="_blank" className="text-blue-600 underline">詳細</a> : '-'}
-            </div>
-          </div>
-          <div className="rounded border p-3">
-            <div className="text-sm font-semibold">GEO（参考）</div>
-            <div className="mt-1 text-sm">URL: {geoUrl ? <a href={geoUrl} target="_blank" className="text-blue-600 underline">開く</a> : '-'}</div>
-            <div className="mt-1 text-sm">未使用: {geoUnused ?? '-'}</div>
-            <div className="mt-1 text-sm">中古: {geoUsed ?? '-'}</div>
+
+            {geoError && <div style={{ color:'#b91c1c', fontSize:12 }}>取得失敗：{geoError}</div>}
+
+            {!geoError && geoResult && (
+              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:6, fontSize:14 }}>
+                <div><span style={{ color:'#6b7280' }}>キャリア：</span>{geoResult.carrier || '不明'}</div>
+                <div><span style={{ color:'#6b7280' }}>未使用：</span>
+                  {geoResult.unusedText ? `¥${geoResult.unusedText}` : (geoResult.unused ? `¥${geoResult.unused.toLocaleString()}` : '-')}
+                </div>
+                <div><span style={{ color:'#6b7280' }}>中古：</span>
+                  {geoResult.usedText ? `¥${geoResult.usedText}` : (geoResult.used ? `¥${geoResult.used.toLocaleString()}` : '-')}
+                </div>
+                <div style={{ gridColumn:'1 / -1', fontSize:12 }}>
+                  <span style={{ color:'#6b7280' }}>商品：</span>
+                  {geoResult.url
+                    ? <a href={geoResult.url} target="_blank" rel="noreferrer" style={{ color:'#2563eb' }}>{geoResult.title}</a>
+                    : geoResult.title}
+                </div>
+              </div>
+            )}
+            {!geoError && !geoResult && !geoLoading && <div style={{ color:'#6b7280', fontSize:12 }}>未取得（「更新」を押してください）</div>}
           </div>
         </div>
-      </section>
+      </div>
 
-      {/* 社内査定金額 */}
-      <section className="rounded-lg border bg-white p-4">
-        <h3 className="mb-3 text-base font-semibold">社内査定</h3>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs text-gray-500">提示額（円）</span>
-            <input className="rounded border p-2" value={offerPrice} onChange={(e) => setOfferPrice(e.target.value)} />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs text-gray-500">MAX目安（円）</span>
-            <input className="rounded border p-2" value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)} />
-          </label>
-          <label className="flex flex-col gap-1 md:col-span-1">
-            <span className="text-xs text-gray-500">減額理由（簡潔に）</span>
-            <input className="rounded border p-2" value={deductions} onChange={(e) => setDeductions(e.target.value)} placeholder="バッテリー劣化/傷/付属品無し 等" />
-          </label>
+      {/* 付属品/ロック/状態 */}
+      <div style={section}>
+        <div style={row4}>
+          <div style={label}>箱・付属品</div>
+          <select style={box as any} value={acc} onChange={(e)=>setAcc(e.target.value)}>
+            {ACCESSORIES.map(a => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <div style={label}>SIMロック</div>
+          <select style={box as any} value={simLock} onChange={(e)=>setSimLock(e.target.value)}>
+            {LOCK_YN.map(a => <option key={a} value={a}>{a}</option>)}
+          </select>
         </div>
-      </section>
 
-      {/* OCR bbox デバッグ / プレビュー（任意） */}
-      {Object.keys(bboxMap).length > 0 && (
-        <section className="rounded-lg border bg-white p-4">
-          <h3 className="mb-3 text-base font-semibold">OCR 抽出領域（デバッグ）</h3>
-          <details>
-            <summary className="cursor-pointer text-sm">bboxes を表示</summary>
-            <pre className="mt-2 max-h-64 overflow-auto rounded border bg-gray-50 p-2 text-xs">
-              {JSON.stringify(bboxMap, null, 2)}
-            </pre>
-          </details>
-        </section>
-      )}
+        <div style={{ height: 8 }} />
+        <div style={row4}>
+          <div style={label}>アクティベーションロック</div>
+          <select style={box as any} value={actLock} onChange={(e)=>setActLock(e.target.value)}>
+            {LOCK_YN.map(a => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <div style={label}>状態</div>
+          <select style={box as any} value={condition} onChange={(e)=>setCondition(e.target.value)}>
+            {CONDITIONS.map(c => <option key={c.code} value={c.code}>{c.label}</option>)}
+          </select>
+        </div>
+
+        <div style={{ height: 8 }} />
+        <div style={row2}>
+          <div style={label}>特記事項</div>
+          <textarea style={{ ...box, height: 88, resize: 'vertical' } as any}
+                    placeholder="例）液晶傷あり、Face ID不良 など"
+                    value={conditionNote} onChange={(e)=>setConditionNote(e.target.value)} />
+        </div>
+      </div>
     </div>
   )
 }
