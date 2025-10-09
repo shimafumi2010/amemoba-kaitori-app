@@ -14,5 +14,5 @@
 > ローカル：`.env.local` を作って `npm install && npm run dev`
 
 ## ページ
-- `/assess`：スクショ→OCR→最大価格取得→Chatwork投稿文作成（コピー）
+- `/assess`：スクショ→OCR→最大価格取得→Chatwork投稿文作成（コピー
 - `/deliveries`：納品書雛形
