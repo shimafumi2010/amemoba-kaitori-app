@@ -148,27 +148,82 @@ export default function AssessForm(): JSX.Element {
     }
   }
 
-  /** 機種情報取得・反映（OCR：テキストのみ） — API互換対応版 */
-  async function runOCRInfo() {
-    if (!imgBase64 || ocrLoading) return
-    setOcrLoading(true)
-    setMessage('機種情報取得中…')
-    try {
+  // AssessForm.tsx 内の runOCRInfo を以下で置き換え
+async function runOCRInfo() {
+  if (!imgBase64 || ocrLoading) return
+  setOcrLoading(true)
+  setMessage('機種情報取得中…')
+
+  // バックオフ 0ms, 800ms, 1600ms, 3200ms（サーバが retryAfterSeconds を返したらそれを優先）
+  const delays = [0, 800, 1600, 3200]
+
+  try {
+    for (let i = 0; i < delays.length; i++) {
+      if (delays[i]) await new Promise(r => setTimeout(r, delays[i]))
+
       const res = await fetch('/api/ocr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ imageBase64: imgBase64, mode: 'extractInfo' }),
       })
+
       const text = await res.text()
       let json: any = null
       try { json = JSON.parse(text) } catch {
         setMessage(`OCR失敗：応答がJSONではありません / ${text.slice(0, 140)}…`)
         return
       }
-      if (json?.ok === false) {
-        setMessage(`OCR失敗：${json?.error || 'unknown'}`)
+
+      // 429 → サーバからの指示に従って待機 → もう一度だけ即リトライ（次のループへ）
+      if (res.status === 429 || json?.error === 'RATE_LIMIT') {
+        const secs = Number(json?.retryAfterSeconds ?? 30)
+        setMessage(`OCR待機中… レート制限（約 ${secs} 秒後に再試行）`)
+        await new Promise(r => setTimeout(r, Math.max(1, secs) * 1000))
+        // ここで次のループ継続（i を進める）。最後までいったら下で失敗表示。
+        continue
+      }
+
+      if (!res.ok || json?.ok === false) {
+        // 他のエラーは即時エラーメッセージ
+        setMessage(`OCR失敗：${json?.error || `HTTP ${res.status} ${res.statusText}`}`)
         return
       }
+
+      // ===== 成功：新API → 既存UI項目へマッピング =====
+      const fields = json.fields ?? {}
+      const bboxes = json.bboxes ?? {}
+
+      setImeiBBox(bboxes?.imei?.[0] ?? bboxes?.IMEI?.[0] ?? null)
+      setSerialBBox(bboxes?.serial?.[0] ?? bboxes?.Serial?.[0] ?? null)
+
+      const imeiNorm = normalizeIMEI((fields.imeiCandidates?.[0] ?? '') as string) || ''
+      const serialNorm = normalizeSerial((fields.serialCandidates?.[0] ?? '') as string) || ''
+      const modelFront = (fields.modelCandidates?.[0] ?? '').toString()
+      const batteryPct = typeof fields.batteryPercent === 'number' && Number.isFinite(fields.batteryPercent)
+        ? `${Math.round(Math.max(0, Math.min(100, fields.batteryPercent)))}%`
+        : ''
+
+      setDevice(d => ({
+        ...d,
+        model_number: modelFront || d.model_number,
+        imei: imeiNorm || d.imei,
+        serial: serialNorm || d.serial,
+        battery: batteryPct || d.battery,
+      }))
+
+      setMessage('OCR完了：必要項目を反映しました（切り抜きは別ボタンで実行）')
+      return
+    }
+
+    // ここまで来たら、全リトライ枠を使い切った
+    setMessage('OCR失敗：レート制限により再試行回数を超えました。しばらくしてから実行してください。')
+  } catch (e: any) {
+    setMessage(`OCR失敗：${e?.message ?? 'unknown error'}`)
+  } finally {
+    setOcrLoading(false)
+  }
+}
+
 
       // ===== 新APIフォーマットを旧UI項目へマッピング =====
       const fields = json?.fields ?? {}
