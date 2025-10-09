@@ -71,9 +71,7 @@ async function cropByROI(imageBase64: string) {
     cropFromBase64ByBbox(imageBase64, ROI.table.imei),
     cropFromBase64ByBbox(imageBase64, ROI.table.serial),
   ])
-  return {
-    modelName, capacity, color, salesModel, imei, serial,
-  }
+  return { modelName, capacity, color, salesModel, imei, serial }
 }
 
 async function downscaleBase64(dataUrl: string, maxW = 1400): Promise<string> {
@@ -162,88 +160,85 @@ export default function AssessForm(): JSX.Element {
   useEffect(() => { setGeoResult(null) }, [device.carrier])
 
   /** 貼り付け（Snipping Tool → Ctrl+V） */
-async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
-  const items = e.clipboardData?.items
-  if (!items) return
-  for (const it of items) {
-    if (it.type.startsWith('image/')) {
-      const f = it.getAsFile()
-      if (!f) continue
-      const raw = await fileToBase64(f)
-      // ★ 1200px まで縮小（トークン節約をさらに強化）
-      const light = await downscaleBase64(raw, 1200)
-      setImgBase64(light)
-      setMessage('画像貼り付け完了。「機種情報取得・反映」で文字取得 → 「画像からIMEI/シリアルを切り抜き」で切り抜き実行')
-      e.preventDefault()
-      return
+  async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
+    const items = e.clipboardData?.items
+    if (!items) return
+    for (const it of items) {
+      if (it.type.startsWith('image/')) {
+        const f = it.getAsFile()
+        if (!f) continue
+        const raw = await fileToBase64(f)
+        // トークン節約のため 1200px まで縮小
+        const light = await downscaleBase64(raw, 1200)
+        setImgBase64(light)
+        setMessage('画像貼り付け完了。「機種情報取得・反映」で文字取得 → 「画像からIMEI/シリアルを切り抜き」で切り抜き実行')
+        e.preventDefault()
+        return
+      }
     }
   }
-}
 
-
-  // ROIベースで小画像に分割してから一括OCR
+  // ===== ROIベースで小画像に分割してから一括OCR（強化リトライ） =====
   async function runOCRInfo() {
     if (!imgBase64 || ocrLoading) return
     setOcrLoading(true)
     setMessage('機種情報取得中…')
 
-     // 小さめにして送信トークン削減（貼り付け時に縮小済みでもOK）
-  const tiles = await cropByROI(imgBase64)
-  const reqTiles = [
-    { key: 'modelName',      imageBase64: tiles.modelName! },
-    { key: 'capacity',       imageBase64: tiles.capacity! },
-    { key: 'color',          imageBase64: tiles.color! },
-    { key: 'salesModelFull', imageBase64: tiles.salesModel! },
-    { key: 'imei',           imageBase64: tiles.imei! },
-    { key: 'serial',         imageBase64: tiles.serial! },
-  ].filter(t => !!t.imageBase64)
+    const tiles = await cropByROI(imgBase64)
+    const reqTiles = [
+      { key: 'modelName',      imageBase64: tiles.modelName! },
+      { key: 'capacity',       imageBase64: tiles.capacity! },
+      { key: 'color',          imageBase64: tiles.color! },
+      { key: 'salesModelFull', imageBase64: tiles.salesModel! },
+      { key: 'imei',           imageBase64: tiles.imei! },
+      { key: 'serial',         imageBase64: tiles.serial! },
+    ].filter(t => !!t.imageBase64)
 
-  // 429を考慮した最大5回のリトライ（Retry-After優先 + 指数バックオフ + ジッター）
-  const maxAttempts = 5
-  let attempt = 0
-  let lastErrText = ''
+    const maxAttempts = 5
+    let attempt = 0
+    let lastErrText = ''
 
-  while (attempt < maxAttempts) {
-    attempt++
-    try {
-      const res = await fetch('/api/ocr', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: 'tile', tiles: reqTiles }),
-      })
+    while (attempt < maxAttempts) {
+      attempt++
+      try {
+        const res = await fetch('/api/ocr', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'tile', tiles: reqTiles }),
+        })
 
-      if (res.status === 429) {
-        // サーバ返却の retryAfterSeconds を優先
-        let waitSec = 25
-        try {
-          const j = await res.json()
-          if (typeof j?.retryAfterSeconds === 'number') waitSec = Math.max(10, Math.min(90, j.retryAfterSeconds))
-        } catch {}
-        const extra = Math.min(12, Math.pow(2, attempt)) + Math.floor(Math.random() * 3)
-        const totalWait = waitSec + extra
-        setMessage(`OCR待機中…（レート制限）約 ${totalWait} 秒後に再試行（${attempt}/${maxAttempts}）`)
-        await new Promise(r => setTimeout(r, totalWait * 1000))
-        continue
-      }
+        if (res.status === 429) {
+          let waitSec = 25
+          try {
+            const j = await res.json()
+            if (typeof j?.retryAfterSeconds === 'number') waitSec = Math.max(10, Math.min(90, j.retryAfterSeconds))
+          } catch {}
+          const extra = Math.min(12, Math.pow(2, attempt)) + Math.floor(Math.random() * 3)
+          const totalWait = waitSec + extra
+          setMessage(`OCR待機中…（レート制限）約 ${totalWait} 秒後に再試行（${attempt}/${maxAttempts}）`)
+          await new Promise(r => setTimeout(r, totalWait * 1000))
+          continue
+        }
 
-      if (!res.ok) {
-        lastErrText = await res.text().catch(() => `${res.status} ${res.statusText}`)
-        throw new Error(lastErrText || 'HTTP error')
-      }
+        if (!res.ok) {
+          lastErrText = await res.text().catch(() => `${res.status} ${res.statusText}`)
+          throw new Error(lastErrText || 'HTTP error')
+        }
 
-      const json = await res.json()
-      applyTileResult(json?.tiles || {})
-      setOcrLoading(false)
-      return
-    } catch (e: any) {
-      if (attempt >= maxAttempts) {
-        setMessage(`OCR失敗：レート制限または通信失敗により中断しました。${lastErrText || e?.message || ''}`)
+        const json = await res.json()
+        applyTileResult(json?.tiles || {})
         setOcrLoading(false)
         return
+      } catch (e: any) {
+        if (attempt >= maxAttempts) {
+          setMessage(`OCR失敗：レート制限または通信失敗により中断しました。${lastErrText || e?.message || ''}`)
+          setOcrLoading(false)
+          return
+        }
+        const extra = Math.min(10, Math.pow(2, attempt)) + Math.floor(Math.random() * 3)
+        setMessage(`OCR再試行準備中… 約 ${extra} 秒待機（${attempt}/${maxAttempts}）`)
+        await new Promise(r => setTimeout(r, extra * 1000))
       }
-      const extra = Math.min(10, Math.pow(2, attempt)) + Math.floor(Math.random() * 3)
-      setMessage(`OCR再試行準備中… 約 ${extra} 秒待機（${attempt}/${maxAttempts}）`)
-      await new Promise(r => setTimeout(r, extra * 1000))
     }
   }
 
@@ -265,7 +260,6 @@ async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
       serial: serialNorm || d.serial,
     }))
 
-    // ROI切り抜きのプレビュー（IMEI/Serial）
     if (imgBase64) {
       cropFromBase64ByBbox(imgBase64, ROI.table.imei).then((u) => setImeiCrop(u))
       cropFromBase64ByBbox(imgBase64, ROI.table.serial).then((u) => setSerialCrop(u))
@@ -276,6 +270,7 @@ async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
     setMessage('OCR完了：必要項目を反映しました（切り抜きは右プレビューに表示）')
   }
 
+  /** 画像からIMEI/シリアルを切り抜き（ROI → crop） */
   async function runCrop() {
     if (!imgBase64) { setMessage('先に画像を貼り付けてください'); return }
     const hasImei = !!ROI.table.imei
@@ -428,6 +423,7 @@ async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
     <div id="assess-root" style={{ display: 'grid', gap: 16, padding: 16, maxWidth: 980, margin: '0 auto', background: '#f6f7fb' }}>
       <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, textAlign: 'center' }}>アメモバ買取 富山店　査定受付票</h2>
 
+      {/* 受付 */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>担当者</div>
@@ -439,6 +435,7 @@ async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
         </div>
       </div>
 
+      {/* お客様情報 */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>お客様選択</div>
@@ -458,6 +455,7 @@ async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
         </div>
       </div>
 
+      {/* 3uTools：貼付け＆OCR */}
       <div style={section}>
         <div style={row2}>
           <div style={label}>3uTools画像</div>
@@ -504,6 +502,7 @@ async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
         </div>
       </div>
 
+      {/* 端末情報 + クロッププレビュー */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>機種名</div><input style={box as any} value={device.model_name} onChange={(e)=>setDevice({...device,model_name:e.target.value})}/>
@@ -559,6 +558,7 @@ async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
         </div>
       </div>
 
+      {/* 価格・検索・ゲオ */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>MAX買取価格</div><input style={box as any} placeholder="例）51000" value={maxPrice} onChange={(e)=>setMaxPrice(e.target.value as any)}/>
@@ -606,6 +606,7 @@ async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
         </div>
       </div>
 
+      {/* 付属品/ロック/状態 */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>箱・付属品</div>
@@ -639,6 +640,7 @@ async function handlePaste(e: React.ClipboardEvent<HTMLDivElement>) {
         </div>
       </div>
 
+      {/* 保存検索 */}
       <div style={section}>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
           <div style={label}>保存データ検索</div>
