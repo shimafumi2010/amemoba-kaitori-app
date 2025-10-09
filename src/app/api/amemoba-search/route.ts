@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-// シンプルなHTMLスクレイプ：amemoba買取ページからモデル検索結果を取得
 export const runtime = 'nodejs'
 export const preferredRegion = ['hnd1', 'icn1']
 
@@ -24,8 +23,8 @@ export async function POST(req: NextRequest) {
     else if (carrier?.includes('Soft')) carrierSlug = 'softbank'
     else if (carrier?.includes('楽天')) carrierSlug = 'rakuten'
 
-    // 検索結果内リンクを抽出
-    const links = Array.from(html.matchAll(/href=\"(\\/kaitori\\/detail\\/[^\\\"]+)\"/g)).map((m) => m[1])
+    // 検索結果内リンクを抽出（エスケープ最小限）
+    const links = Array.from(html.matchAll(/href="(\/kaitori\/detail\/[^"]+)"/g)).map((m) => m[1])
     const firstLink = links.length > 0 ? `${BASE_URL}${links[0]}` : null
 
     return NextResponse.json({ ok: true, modelPrefix, carrierSlug, searchUrl, firstLink })
