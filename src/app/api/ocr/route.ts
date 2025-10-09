@@ -1,10 +1,11 @@
-// src/app/api/ocr/route.ts
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import OpenAI from 'openai'
 
+// Node ランタイム指定（Vercel）
 export const runtime = 'nodejs'
+export const preferredRegion = ['hnd1', 'icn1', 'sin1', 'sfo1']
 
-type OcrResult = {
+type OcrOut = {
   model_name?: string
   capacity?: string
   color?: string
@@ -12,148 +13,133 @@ type OcrResult = {
   imei?: string
   serial?: string
   battery?: string
-  imei_bbox?: { x: number; y: number; w: number; h: number } | null
-  serial_bbox?: { x: number; y: number; w: number; h: number } | null
+}
+type BBox = { x: number; y: number; w: number; h: number }
+type OcrBBoxes = Partial<Record<'model_number' | 'imei' | 'serial' | 'header', BBox>>
+
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+
+function bad(error: string, status = 400) {
+  return NextResponse.json({ ok: false, error }, { status })
 }
 
-// 数字だけ
-function digitsOnly(s: string) {
-  return (s || '').replace(/\D+/g, '')
-}
-
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
-    // 👇 二重で JSON.parse していたバグを解消（1回だけ）
-    const { imageBase64 } = (await req.json()) as { imageBase64: string }
-
+    const body = (await req.json()) as { imageBase64?: string }
+    const imageBase64 = body?.imageBase64
     if (!imageBase64 || typeof imageBase64 !== 'string') {
-      return NextResponse.json({ ok: false, error: 'imageBase64 is required' }, { status: 400 })
+      return bad('imageBase64 is required', 400)
     }
 
-    // data URL でも外部URLでも、そのまま渡す
-    const isDataUrl = imageBase64.startsWith('data:image/')
-    const imageUrl = isDataUrl ? imageBase64 : imageBase64
-
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-
     const systemPrompt =
-      'あなたはリユース端末の査定ツールです。ユーザーがアップロードする3uToolsのスクリーンショットから指定のJSONだけを厳密に返して下さい。追加の説明文は不要。'
+      'You are an OCR/IE agent for used phone trade-in. Extract ONLY JSON. Japanese/English mix is common.'
 
-    const schemaHint = `
-期待するJSONのキー:
+    // 期待スキーマと bboxes 指示
+    const userPrompt = `
+3uTools のスクリーンショット画像から以下を抽出して JSON のみで返す。
+
+必須キー:
 {
-  "model_name": "iPhone 11 Pro など（ヘッダー左上の機種名）",
-  "capacity": "64GB など（GB/TB付きで）",
-  "color": "Midnight Green など",
-  "model_number": "MWC62 J/A のようにスペースやスラッシュを含むフル表記",
-  "imei": "15桁の数字",
-  "serial": "英数字のシリアル",
-  "battery": "85% のように百分率（%付き推奨）",
-  "imei_bbox": {"x":0..1,"y":0..1,"w":0..1,"h":0..1} または null,
-  "serial_bbox": {"x":0..1,"y":0..1,"w":0..1,"h":0..1} または null
+ "model_name": "例: iPhone 11 Pro",
+ "capacity": "例: 64GB",
+ "color": "例: Midnight Green",
+ "model_number": "例: MWC62 J/A",
+ "imei": "15桁の数字",
+ "serial": "英数字12桁程度",
+ "battery": "例: 100%"
 }
 
-補助ヒント:
-- 3uTools の表示例: Title/Device 名・SalesModel(モデル番号)・HardDiskCapacity(容量)・SerialNumber・IMEI・Battery Life など
-- 表記ゆれ: 容量 "256 GB" → "256GB" に揃える, "1 TB" → "1TB"
-- 取り出せないフィールドは空文字にする
+制約:
+- battery は "85%" のように % を含める
+- capacity は "256 GB" のような表記は "256GB" に正規化
+- 文字の前後空白は除去
+
+さらに、以下のテキストブロックの概形 bbox(0..1) も返す:
+{
+ "model_number": {x,y,w,h},
+ "imei": {x,y,w,h},
+ "serial": {x,y,w,h}
+}
+これらは「Sales Model」「IMEI」「Serial Number」の値テキストの矩形を含むように近似でよい。
+出力は JSON のみ。
 `.trim()
 
-    // 型が厳しい SDK でも通るよう any で messages を構築
-    const messages: any = [
-      { role: 'system', content: systemPrompt },
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: `以下の画像から、指定のJSONだけを返してください。\n${schemaHint}\n出力はJSONのみ。` },
-          { type: 'image_url', image_url: { url: imageUrl } },
-        ],
-      },
-    ]
-
+    // 型の厳格チェックを避けるため any で messages を構築
     const resp = await client.chat.completions.create({
       model: 'gpt-4o-mini',
       temperature: 0.1,
-      response_format: { type: 'json_object' },
-      messages,
-    })
+      messages: [
+        { role: 'system', content: systemPrompt } as any,
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: userPrompt },
+            { type: 'image_url', image_url: { url: imageBase64 } }
+          ]
+        } as any
+      ],
+      response_format: { type: 'json_object' }
+    } as any)
 
-    let content = resp.choices?.[0]?.message?.content ?? ''
-    if (!content) {
-      return NextResponse.json({ ok: false, error: 'Empty OCR response' }, { status: 500 })
+    let content = resp.choices?.[0]?.message?.content ?? '{}'
+
+    // JSON抽出（保険）
+    const m = content.match(/\{[\s\S]*\}/)
+    if (m) content = m[0]
+
+    let parsed: any = {}
+    try { parsed = JSON.parse(content) } catch { parsed = {} }
+
+    // 正規化
+    const out: OcrOut = {}
+    if (parsed.model_name) out.model_name = String(parsed.model_name).trim()
+    if (parsed.capacity) {
+      const cap = String(parsed.capacity).replace(/\s+/g, '').toUpperCase()
+      out.capacity = cap.replace(/ＴＢ/g, 'TB').replace(/ＧＢ/g, 'GB')
+    }
+    if (parsed.color) out.color = String(parsed.color).trim()
+    if (parsed.model_number) {
+      out.model_number = String(parsed.model_number)
+        .replace(/[Ａ-Ｚａ-ｚ０-９／]/g, (s: string) => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
+        .replace(/\s{2,}/g, ' ')
+        .trim()
+    }
+    if (parsed.imei) {
+      const d = String(parsed.imei).replace(/\D+/g, '').match(/\d{15}/)
+      if (d) out.imei = d[0]
+    }
+    if (parsed.serial) {
+      out.serial = String(parsed.serial).replace(/[^0-9A-Za-z]/g, '').slice(0, 20)
+    }
+    if (parsed.battery) {
+      const b = String(parsed.battery).match(/(\d{2,3})\s*%?/)
+      if (b) out.battery = `${b[1]}%`
     }
 
-    // JSON部分だけ抽出（保険）
-    const jsonMatch = content.match(/\{[\s\S]*\}/)
-    if (jsonMatch) content = jsonMatch[0]
-
-    let parsed: OcrResult = {}
-    try {
-      parsed = JSON.parse(content) as OcrResult
-    } catch {
-      parsed = {}
-    }
-
-    // ---- 軽い正規化 ----
-    const normalized: OcrResult = { ...parsed }
-
-    // 容量: "256 GB" → "256GB", "1 TB" → "1TB"
-    if (normalized.capacity) {
-      const cap = normalized.capacity
-        .replace(/\s+/g, '')
-        .replace(/ＴＢ/gi, 'TB')
-        .replace(/ＧＢ/gi, 'GB')
-      const m = cap.match(/^(\d+(?:\.\d+)?)(GB|TB)$/i) || cap.match(/^(\d+(?:\.\d+)?)/)
-      if (m) {
-        const num = m[1]
-        const unit = (m[2] || 'GB').toUpperCase()
-        normalized.capacity = `${num}${unit}`
+    const bboxes: OcrBBoxes = {}
+    const bb = parsed.bboxes || parsed.bbox || {}
+    for (const k of ['model_number', 'imei', 'serial']) {
+      const v = bb?.[k]
+      if (v && typeof v.x === 'number' && typeof v.y === 'number' && typeof v.w === 'number' && typeof v.h === 'number') {
+        // 0..1 にクランプ
+        bboxes[k as keyof OcrBBoxes] = {
+          x: Math.min(1, Math.max(0, v.x)),
+          y: Math.min(1, Math.max(0, v.y)),
+          w: Math.min(1, Math.max(0, v.w)),
+          h: Math.min(1, Math.max(0, v.h))
+        }
       }
     }
 
-    // IMEI: 最初の15桁に整形
-    if (normalized.imei) {
-      const m = digitsOnly(normalized.imei).match(/(\d{15})/)
-      if (m) normalized.imei = m[1]
-    }
-
-    // バッテリー: "85%" or "85" → "85%"
-    if (normalized.battery) {
-      const m = normalized.battery.match(/(\d{2,3})\s*%?/)
-      if (m) normalized.battery = `${m[1]}%`
-    }
-
-    // モデル番号: 全角→半角, 連続空白を単一スペース（※フル表記保持）
-    if (normalized.model_number) {
-      normalized.model_number = normalized.model_number
-        .replace(/[Ａ-Ｚａ-ｚ０-９／]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
-        .replace(/\s+/g, ' ')
-        .trim()
-    }
-
-    // bbox は任意。なければ null を入れる
-    const imei_bbox =
-      parsed?.imei_bbox && typeof parsed.imei_bbox === 'object'
-        ? parsed.imei_bbox
-        : null
-    const serial_bbox =
-      parsed?.serial_bbox && typeof parsed.serial_bbox === 'object'
-        ? parsed.serial_bbox
-        : null
-
-    return NextResponse.json({ ok: true, data: normalized, imei_bbox, serial_bbox })
+    return NextResponse.json({ ok: true, data: out, bboxes })
   } catch (e: any) {
-    // OpenAIレート制限の明示返却（フロントの自動リトライ用）
-    const status = typeof e?.status === 'number' ? e.status : 500
-    if (status === 429) {
-      // OpenAIのヘッダに Retry-After がある場合はそれを伝える
-      const retryAfterSeconds = Number(e?.headers?.get?.('retry-after')) || 30
-      return NextResponse.json(
-        { ok: false, error: 'RATE_LIMIT', retryAfterSeconds },
-        { status: 429 },
-      )
+    // レート制限など
+    if (e?.status === 429 || /rate limit/i.test(e?.message || '')) {
+      // OpenAIの「Retry-After」秒数が取れないケースもあるので固定30秒返す
+      return NextResponse.json({ ok: false, error: 'RATE_LIMIT', retryAfterSeconds: 30 }, { status: 429 })
     }
-    const msg = e?.message || 'OCR処理エラー'
+    const msg = e?.message ?? 'OCR処理でエラーが発生しました'
+    const status = typeof e?.status === 'number' ? e.status : 500
     return NextResponse.json({ ok: false, error: msg }, { status })
   }
 }
