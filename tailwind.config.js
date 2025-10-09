@@ -1,14 +1,9 @@
-/** @type {import('tailwindcss').Config} */
-module.exports = {
-  content: [
-    "./src/**/*.{js,ts,jsx,tsx}", // App Router対応
-  ],
+export default /** @type {import('tailwindcss').Config} */ ({
+  content: ["./src/**/*.{js,ts,jsx,tsx}"],
   theme: {
     extend: {
-      fontFamily: {
-        sans: ['"Noto Sans JP"', 'system-ui', 'sans-serif'],
-      },
+      fontFamily: { sans: ['"Noto Sans JP"', 'system-ui', 'sans-serif'] },
     },
   },
   plugins: [],
-}
+})
