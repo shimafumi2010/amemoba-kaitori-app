@@ -230,6 +230,51 @@ async function runOCRInfo() {
   }
 }
 
+
+      // ===== 成功：新フィールドも含めて反映 =====
+      const fields = json.fields ?? {}
+      const bboxes = json.bboxes ?? {}
+
+      setImeiBBox(bboxes?.imei?.[0] ?? bboxes?.IMEI?.[0] ?? null)
+      setSerialBBox(bboxes?.serial?.[0] ?? bboxes?.Serial?.[0] ?? null)
+
+      const imeiNorm = normalizeIMEI((fields.imeiCandidates?.[0] ?? '') as string) || ''
+      const serialNorm = normalizeSerial((fields.serialCandidates?.[0] ?? '') as string) || ''
+      const modelFront = (fields.modelCandidates?.[0] ?? '').toString()
+
+      // ここで機種名 / 容量 / カラーを優先反映（null/空は無視）
+      const modelName = (fields.modelName ?? '').toString().trim()
+      const capacity = (fields.capacity ?? '').toString().trim()
+      const color = (fields.color ?? '').toString().trim()
+
+      const batteryPct =
+        typeof fields.batteryPercent === 'number' && Number.isFinite(fields.batteryPercent)
+          ? `${Math.round(Math.max(0, Math.min(100, fields.batteryPercent)))}%`
+          : ''
+
+      setDevice((d) => ({
+        ...d,
+        model_name: modelName || d.model_name,
+        capacity: capacity || d.capacity,
+        color: color || d.color,
+        model_number: modelFront || d.model_number,
+        imei: imeiNorm || d.imei,
+        serial: serialNorm || d.serial,
+        battery: batteryPct || d.battery,
+      }))
+
+      setMessage('OCR完了：必要項目を反映しました（切り抜きは別ボタンで実行）')
+      return
+    }
+
+    setMessage('OCR失敗：レート制限により再試行回数を超えました。しばらくしてから実行してください。')
+  } catch (e: any) {
+    setMessage(`OCR失敗：${e?.message ?? 'unknown error'}`)
+  } finally {
+    setOcrLoading(false)
+  }
+}
+
   /** 画像からIMEI/シリアルを切り抜き（bbox → crop） */
   async function runCrop() {
     if (!imgBase64) { setMessage('先に画像を貼り付けてください'); return }
