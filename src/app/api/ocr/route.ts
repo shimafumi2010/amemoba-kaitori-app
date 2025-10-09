@@ -1,139 +1,80 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
+import OpenAI from 'openai'
 
-/**
- * OpenAI Vision OCR（3uTools用）
- * - 429/5xx: 指数バックオフで最大4回リトライ
- * - 各試行にタイムアウト（30s）
- * - いかなる失敗でも JSON を返す（フロントを固まらせない）
- * - bbox は 0〜1 の相対座標
- */
-export async function POST(req: Request) {
-  try {
-    const { imageBase64 } = await req.json()
-    const apiKey = process.env.OPENAI_API_KEY
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
-    if (!apiKey) {
-      return NextResponse.json({ ok: false, error: 'OPENAI_API_KEY is not set' }, { status: 200 })
-    }
-    if (!imageBase64) {
-      return NextResponse.json({ ok: false, error: 'imageBase64 is required' }, { status: 200 })
-    }
+export const runtime = 'nodejs'
+export const preferredRegion = ['hnd1', 'icn1', 'sin1', 'sfo1']
 
-    const schemaHint = `
-必ず以下の JSON **だけ** を返すこと:
-
-{
-  "model_name": string|null,
-  "capacity": string|null,
-  "color": string|null,
-  "model_number": string|null,
-  "imei": string|null,
-  "serial": string|null,
-  "battery": string|null,
-  "imei_bbox": {"x": number, "y": number, "w": number, "h": number} | null,
-  "serial_bbox": {"x": number, "y": number, "w": number, "h": number} | null
+function bad(message: string, status = 400) {
+  return NextResponse.json({ ok: false, error: message }, { status })
 }
 
-制約:
-- imei_bbox / serial_bbox は画像全体に対する相対比 (0〜1)。
-- JSON 以外の出力（説明、コードブロック、余計な文字）は一切禁止。
-`.trim()
+type OcrOutFields = {
+  imeiCandidates: string[]
+  serialCandidates: string[]
+  modelCandidates: string[]
+  batteryPercent: number | null
+}
 
-    const payload = {
+export async function POST(req: NextRequest) {
+  try {
+    const { imageBase64 } = await req.json()
+    if (!imageBase64 || typeof imageBase64 !== 'string') {
+      return bad('imageBase64 が必要です')
+    }
+
+    const prompt = `You are an OCR/IE agent. Extract fields from the image if present.
+- Return JSON with keys: imeiCandidates (array), serialCandidates (array), modelCandidates (array), batteryPercent (number or null), bboxes (object)
+- IMEI should be 15 digits; provide multiple candidates if seen
+- Apple Serial is usually 12 alnum chars; include variants if ambiguous (e.g., Z/2, O/0)
+- Model (front part) usually 5 alnum like MLJH3 (ignore suffix like J/A)
+- Battery percent as integer if shown (0-100)
+- Provide approximate bounding boxes for IMEI and Serial tokens if possible (normalized 0..1)
+Output only JSON.`
+
+    const res = await client.chat.completions.create({
       model: 'gpt-4o-mini',
+      temperature: 0.2,
       messages: [
         {
           role: 'user',
           content: [
-            { type: 'text', text: 'これは 3uTools の端末情報スクリーンショットです。指定のJSONスキーマで抽出してください。' },
-            { type: 'text', text: schemaHint },
-            { type: 'image_url', image_url: imageBase64 },
+            { type: 'text', text: prompt },
+            { type: 'input_image', image_url: imageBase64 },
           ],
         },
       ],
-      temperature: 0.1,
-    }
+      response_format: { type: 'json_object' },
+    })
 
-    async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number) {
-      const controller = new AbortController()
-      const id = setTimeout(() => controller.abort(), timeoutMs)
-      try {
-        const res = await fetch(url, { ...options, signal: controller.signal })
-        return res
-      } finally {
-        clearTimeout(id)
-      }
-    }
+    const content = res.choices?.[0]?.message?.content ?? '{}'
 
-    async function callOpenAIWithRetry(maxAttempts = 4) {
-      let lastErr: any = null
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        try {
-          const r = await fetchWithTimeout(
-            'https://api.openai.com/v1/chat/completions',
-            {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify(payload),
-            },
-            30_000 // 30s
-          )
-
-          const data = await r.json().catch(() => ({}))
-          if (r.ok) return data
-
-          // 429 or 5xx: リトライ
-          if (r.status === 429 || r.status >= 500) {
-            lastErr = { status: r.status, data }
-            const retryAfter = Number(r.headers.get('retry-after') || 0)
-            const backoff = retryAfter > 0 ? retryAfter * 1000 : Math.min(1500 * Math.pow(2, attempt - 1), 8000)
-            await new Promise(res => setTimeout(res, backoff))
-            continue
-          }
-          // 他のエラーは即終了
-          return Promise.reject({ status: r.status, data })
-        } catch (e: any) {
-          lastErr = e
-          // ネットワーク/タイムアウト → 少し待って再試行
-          const backoff = Math.min(1500 * Math.pow(2, attempt - 1), 8000)
-          await new Promise(res => setTimeout(res, backoff))
-        }
-      }
-      throw lastErr ?? new Error('OpenAI retry exceeded')
-    }
-
-    const data = await callOpenAIWithRetry().catch((e) => ({ __error: e }))
-
-    if ((data as any).__error) {
-      const err = (data as any).__error
-      return NextResponse.json(
-        { ok: false, error: `OpenAI request failed: ${err?.message || 'unknown'}` },
-        { status: 200 }
-      )
-    }
-
-    const text = data?.choices?.[0]?.message?.content ?? ''
-    if (!text || typeof text !== 'string') {
-      return NextResponse.json({ ok: false, error: 'OpenAI returned empty content' }, { status: 200 })
-    }
-
-    let parsed: any = null
+    let parsed: any = {}
     try {
-      parsed = JSON.parse(text)
+      parsed = JSON.parse(content)
     } catch {
-      return NextResponse.json(
-        { ok: false, error: 'Failed to parse OCR JSON', raw: text.slice(0, 400) },
-        { status: 200 }
-      )
+      const jsonLike = content.match(/\{[\s\S]*\}/)?.[0]
+      parsed = jsonLike ? JSON.parse(jsonLike) : {}
     }
 
-    // 正常
-    return NextResponse.json({ ok: true, data: parsed }, { status: 200 })
+    const fields: OcrOutFields = {
+      imeiCandidates: Array.isArray(parsed.imeiCandidates) ? parsed.imeiCandidates : [],
+      serialCandidates: Array.isArray(parsed.serialCandidates) ? parsed.serialCandidates : [],
+      modelCandidates: Array.isArray(parsed.modelCandidates) ? parsed.modelCandidates : [],
+      batteryPercent:
+        typeof parsed.batteryPercent === 'number' && Number.isFinite(parsed.batteryPercent)
+          ? Math.max(0, Math.min(100, Math.round(parsed.batteryPercent)))
+          : null,
+    }
+
+    const bboxes = typeof parsed.bboxes === 'object' && parsed.bboxes ? parsed.bboxes : {}
+
+    return NextResponse.json({ ok: true, fields, bboxes })
   } catch (e: any) {
-    // いかなる例外も JSON で返す
-    return NextResponse.json({ ok: false, error: e?.message ?? 'unknown' }, { status: 200 })
+    console.error('/api/ocr error', e)
+    const msg = e?.message ?? 'OCR処理でエラーが発生しました'
+    const status = typeof e?.status === 'number' ? e.status : 500
+    return NextResponse.json({ ok: false, error: msg }, { status })
   }
 }
