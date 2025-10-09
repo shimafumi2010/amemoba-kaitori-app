@@ -52,6 +52,7 @@ async function cropFromBase64ByBbox(imageBase64: string, bbox: { x: number; y: n
   })
 }
 
+/** 軽量化：最大幅 1400px まで縮小して base64 返す */
 async function downscaleBase64(dataUrl: string, maxW = 1400): Promise<string> {
   return new Promise((resolve) => {
     const img = new Image()
@@ -66,6 +67,7 @@ async function downscaleBase64(dataUrl: string, maxW = 1400): Promise<string> {
       const ctx = canvas.getContext('2d')!
       ctx.imageSmoothingQuality = 'high'
       ctx.drawImage(img, 0, 0, w, h)
+      // PNGだとサイズが大きいので JPEG 0.9
       resolve(canvas.toDataURL('image/jpeg', 0.9))
     }
     img.onerror = () => resolve(dataUrl)
@@ -218,7 +220,7 @@ export default function AssessForm(): JSX.Element {
     window.open(url, '_blank', 'noopener,noreferrer')
   }
 
-  // 価格（ゲオ等）は省略：既存の実装を残してください（ここでは OCR 固定）
+  // ※ 価格UIやゲオ等は既存のファイル構成に合わせて残してください（このファイルではOCR部分のみ強化）
 
   return (
     <div style={{ display: 'grid', gap: 16, padding: 16, maxWidth: 980, margin: '0 auto', background: '#f6f7fb' }}>
@@ -236,7 +238,7 @@ export default function AssessForm(): JSX.Element {
         </div>
       </div>
 
-      {/* お客様情報（省略可：既存を維持） */}
+      {/* お客様情報 */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>お客様選択</div>
@@ -347,7 +349,7 @@ export default function AssessForm(): JSX.Element {
         </div>
       </div>
 
-      {/* 以下：価格UIやゲオ等は既存を維持（省略） */}
+      {/* （価格・ゲオ等のブロックは、あなたの最新版に合わせて残してください） */}
     </div>
   )
 }
