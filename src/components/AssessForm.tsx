@@ -1,5 +1,5 @@
 'use client'
-import React, { useRef, useState, useEffect, useCallback } from 'react'
+import React, { useRef, useState, useEffect } from 'react'
 import { normalizeIMEI, normalizeSerial } from '../lib/ocrPostprocess'
 
 const STAFFS = ['島野文宏', '島野ひとみ', '中田颯', '（その他）'] as const
@@ -32,7 +32,6 @@ const box: React.CSSProperties = { width: '100%', padding: '8px 10px', border: '
 const row2 = { display: 'grid', gridTemplateColumns: '160px 1fr', gap: 10, alignItems: 'center' } as const
 const row4 = { display: 'grid', gridTemplateColumns: '160px 1fr 160px 1fr', gap: 10, alignItems: 'center' } as const
 
-/** 画像一括クロップ：bbox は 0〜1 の比率 */
 async function cropFromBase64ByBbox(imageBase64: string, bbox: { x: number; y: number; w: number; h: number }): Promise<string | null> {
   return new Promise((resolve) => {
     const img = new Image()
@@ -53,109 +52,30 @@ async function cropFromBase64ByBbox(imageBase64: string, bbox: { x: number; y: n
   })
 }
 
-/** 簡易手動クロッパー（フォールバック用） */
-function Cropper({
-  image,
-  onCropToImei,
-  onCropToSerial,
-}: {
-  image: string
-  onCropToImei: (dataUrl: string) => void
-  onCropToSerial: (dataUrl: string) => void
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const imgRef = useRef<HTMLImageElement | null>(null)
-  const [sel, setSel] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
-  const [drag, setDrag] = useState<{ sx: number; sy: number } | null>(null)
-
-  useEffect(() => {
+/** 軽量化：最大幅 1400px まで縮小して base64 返す */
+async function downscaleBase64(dataUrl: string, maxW = 1400): Promise<string> {
+  return new Promise((resolve) => {
     const img = new Image()
     img.onload = () => {
-      imgRef.current = img
-      draw()
+      const scale = img.width > maxW ? maxW / img.width : 1
+      if (scale >= 1) return resolve(dataUrl)
+      const w = Math.round(img.width * scale)
+      const h = Math.round(img.height * scale)
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')!
+      ctx.imageSmoothingQuality = 'high'
+      ctx.drawImage(img, 0, 0, w, h)
+      // PNGだとサイズが大きいので JPEG 0.9
+      resolve(canvas.toDataURL('image/jpeg', 0.9))
     }
-    img.src = image
-  }, [image])
-
-  const draw = useCallback(() => {
-    const cvs = canvasRef.current
-    const img = imgRef.current
-    if (!cvs || !img) return
-    const maxW = 700
-    const scale = img.width > maxW ? maxW / img.width : 1
-    cvs.width = img.width * scale
-    cvs.height = img.height * scale
-    const ctx = cvs.getContext('2d')!
-    ctx.clearRect(0, 0, cvs.width, cvs.height)
-    ctx.drawImage(img, 0, 0, cvs.width, cvs.height)
-    if (sel) {
-      ctx.save()
-      ctx.strokeStyle = '#2563eb'
-      ctx.lineWidth = 2
-      ctx.setLineDash([6, 4])
-      ctx.strokeRect(sel.x, sel.y, sel.w, sel.h)
-      ctx.restore()
-    }
-  }, [sel])
-
-  useEffect(() => { draw() }, [draw])
-
-  const onMouseDown = (e: React.MouseEvent) => {
-    const rect = (e.target as HTMLCanvasElement).getBoundingClientRect()
-    const sx = e.clientX - rect.left
-    const sy = e.clientY - rect.top
-    setDrag({ sx, sy })
-    setSel({ x: sx, y: sy, w: 0, h: 0 })
-  }
-  const onMouseMove = (e: React.MouseEvent) => {
-    if (!drag) return
-    const rect = (e.target as HTMLCanvasElement).getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const y = e.clientY - rect.top
-    setSel(s => (s ? { x: Math.min(drag.sx, x), y: Math.min(drag.sy, y), w: Math.abs(x - drag.sx), h: Math.abs(y - drag.sy) } : s))
-  }
-  const onMouseUp = () => setDrag(null)
-
-  const doCrop = async (to: 'imei' | 'serial') => {
-    const cvs = canvasRef.current
-    const img = imgRef.current
-    if (!cvs || !img || !sel || sel.w < 4 || sel.h < 4) return
-    const scale = cvs.width / img.width
-    const sx = Math.max(0, Math.round(sel.x / scale))
-    const sy = Math.max(0, Math.round(sel.y / scale))
-    const sw = Math.min(img.width - sx, Math.round(sel.w / scale))
-    const sh = Math.min(img.height - sy, Math.round(sel.h / scale))
-    const out = document.createElement('canvas')
-    out.width = sw
-    out.height = sh
-    const octx = out.getContext('2d')!
-    octx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh)
-    const dataUrl = out.toDataURL('image/png')
-    if (to === 'imei') onCropToImei(dataUrl)
-    else onCropToSerial(dataUrl)
-  }
-
-  return (
-    <div style={{ display: 'grid', gap: 8 }}>
-      <div style={{ fontSize: 12, color: '#6b7280' }}>（自動検出に失敗した場合用）画像をドラッグで範囲選択 → 割当</div>
-      <canvas
-        ref={canvasRef}
-        style={{ width: '100%', border: '1px solid #e5e7eb', borderRadius: 8, cursor: 'crosshair' }}
-        onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}
-      />
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button onClick={() => doCrop('imei')} style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #ddd' }}>
-          選択範囲を IMEI 画像に割当
-        </button>
-        <button onClick={() => doCrop('serial')} style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #ddd' }}>
-          選択範囲を シリアル 画像に割当
-        </button>
-      </div>
-    </div>
-  )
+    img.onerror = () => resolve(dataUrl)
+    img.src = dataUrl
+  })
 }
 
-export default function AssessForm() {
+export default function AssessForm(): JSX.Element {
   const [staff, setStaff] = useState('島野ひとみ')
   const [acceptedAt, setAcceptedAt] = useState(() => new Date().toISOString().slice(0, 10))
 
@@ -167,9 +87,8 @@ export default function AssessForm() {
     imei: '', serial: '', battery: '', carrier: '', restrict: ''
   })
 
-  const [acc, setAcc] = useState(''); const [simLock, setSimLock] = useState('')
-  const [actLock, setActLock] = useState(''); const [condition, setCondition] = useState('B')
-  const [conditionNote, setConditionNote] = useState('')
+  const [acc, setAcc] = useState(''); const [simLock, setSimLock] = useState(''); const [actLock, setActLock] = useState('')
+  const [condition, setCondition] = useState('B'); const [conditionNote, setConditionNote] = useState('')
 
   const [maxPrice, setMaxPrice] = useState<number | ''>(''); const [discount, setDiscount] = useState<number | ''>('')
   const [todayPrice, setTodayPrice] = useState<number>(0)
@@ -183,7 +102,6 @@ export default function AssessForm() {
   const [imeiCrop, setImeiCrop] = useState<string | null>(null)
   const [serialCrop, setSerialCrop] = useState<string | null>(null)
   const [message, setMessage] = useState('')
-  const pasteRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const max = typeof maxPrice === 'number' ? maxPrice : Number(maxPrice || 0)
@@ -207,18 +125,17 @@ export default function AssessForm() {
       if (it.type.startsWith('image/')) {
         const f = it.getAsFile()
         if (!f) continue
-        const base64 = await fileToBase64(f)
-        setImgBase64(base64)
-        setMessage('画像貼り付け完了。OCRを実行します。')
+        const raw = await fileToBase64(f)
+        const light = await downscaleBase64(raw, 1400)
+        setImgBase64(light)
+        setMessage('画像貼り付け完了。OCRボタンで解析できます。')
         e.preventDefault()
-        // 自動でOCR実行（便利）
-        setTimeout(runOCR, 10)
         return
       }
     }
   }
 
-  /** OCR 実行（bbox → 自動クロップ） */
+  /** OCR（APIは内部でリトライ） */
   async function runOCR() {
     if (!imgBase64) return
     setMessage('OCR中…')
@@ -228,15 +145,15 @@ export default function AssessForm() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ imageBase64: imgBase64 })
       })
-      if (!res.ok) {
-        let body = ''
-        try { body = await res.text() } catch {}
-        setMessage(`OCR失敗: HTTP ${res.status} ${res.statusText}${body ? ` / ${body.slice(0,180)}…` : ''}`)
+      const text = await res.text()
+      let json: any = null
+      try { json = JSON.parse(text) } catch {
+        setMessage(`OCR失敗: 応答がJSONではありません / ${text.slice(0, 140)}…`)
         return
       }
-      const json = await res.json()
       if (json?.ok === false) {
-        setMessage(`OCR失敗: ${json?.error || 'unknown error'}`)
+        // 429などAPI側記録をそのまま表示（リトライ済み）
+        setMessage(`OCR失敗: ${json?.error || 'unknown'}`)
         return
       }
       const p: any = json?.data ?? {}
@@ -254,7 +171,6 @@ export default function AssessForm() {
         battery: p.battery ?? d.battery,
       }))
 
-      // ★ bbox で自動クロップ
       if (p?.imei_bbox && imgBase64) {
         const url = await cropFromBase64ByBbox(imgBase64, p.imei_bbox)
         if (url) setImeiCrop(url)
@@ -264,9 +180,9 @@ export default function AssessForm() {
         if (url) setSerialCrop(url)
       }
 
-      setMessage('OCR完了：自動抽出＆自動クロップを反映しました。')
+      setMessage('OCR完了：抽出＋自動クロップを反映しました。')
     } catch (e: any) {
-      setMessage(`OCR失敗: ${e?.message ?? 'unknown'}`)
+      setMessage(`OCR失敗: ${e?.message ?? 'unknown error'}`)
     }
   }
 
@@ -394,12 +310,12 @@ export default function AssessForm() {
         </div>
       </div>
 
-      {/* 画像貼付け＋自動OCR */}
+      {/* 3uTools画像 貼付け & OCR */}
       <div style={section}>
         <div style={row2}>
           <div style={label}>3uTools画像</div>
           <div
-            ref={pasteRef} onPaste={handlePaste}
+            onPaste={handlePaste}
             style={{ border: '2px dashed #cbd5e1', borderRadius: 10, minHeight: 180, display: 'grid', placeItems: 'center',
                      color: '#6b7280', background: '#fafafa', textAlign: 'center', padding: 8 }}
             title="ここに Ctrl+V でスクショを貼り付け"
@@ -411,20 +327,13 @@ export default function AssessForm() {
         </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
           <button onClick={runOCR} disabled={!imgBase64} style={{ padding: '6px 12px', borderRadius: 8, border: '1px solid #ddd' }}>
-            OCR再実行
+            OCR実行
           </button>
           <div style={{ color: '#2563eb', fontSize: 13 }}>{message}</div>
         </div>
-
-        {/* フォールバック用の手動クロッパー（自動が出たあとでも使える） */}
-        {imgBase64 && (
-          <div style={{ marginTop: 12 }}>
-            <Cropper image={imgBase64} onCropToImei={(u)=>setImeiCrop(u)} onCropToSerial={(u)=>setSerialCrop(u)} />
-          </div>
-        )}
       </div>
 
-      {/* 端末情報 */}
+      {/* 端末情報（クロッププレビュー付き） */}
       <div style={section}>
         <div style={row4}>
           <div style={label}>機種名</div><input style={box as any} value={device.model_name} onChange={(e)=>setDevice({...device,model_name:e.target.value})}/>
@@ -436,7 +345,6 @@ export default function AssessForm() {
           <div style={label}>モデル番号</div><input style={box as any} value={device.model_number} onChange={(e)=>setDevice({...device,model_number:e.target.value})}/>
         </div>
 
-        {/* 自動クロップ結果プレビュー → 入力と見比べ */}
         {imeiCrop && <div style={{ margin: '6px 0 2px 160px' }}><img src={imeiCrop} alt="imei-crop" style={{ maxHeight: 60, border: '1px solid #e5e7eb', borderRadius: 6 }}/></div>}
         <div style={row4}>
           <div style={label}>IMEI</div>
@@ -468,8 +376,7 @@ export default function AssessForm() {
           <input style={box as any} placeholder="例）100%" value={device.battery} onChange={(e)=>setDevice({...device,battery:e.target.value})}/>
           <div style={label}>キャリア</div>
           <select style={box as any} value={device.carrier} onChange={(e)=>setDevice({...device,carrier:e.target.value})}>
-            <option value=""/>
-            {CARRIERS.map(c => <option key={c} value={c}>{c}</option>)}
+            <option value=""/>{CARRIERS.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
         </div>
 
