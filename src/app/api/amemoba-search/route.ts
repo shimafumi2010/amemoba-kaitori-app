@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 export const runtime = 'nodejs'
 export const preferredRegion = ['hnd1', 'icn1']
 
-const BASE_URL = 'https://amemoba.jp/kaitori'
+const BASE_URL = 'https://amemoba.com/kaitori'
 
 export async function POST(req: NextRequest) {
   try {
